@@ -110,21 +110,21 @@ pub enum DataKey {
     AmmWasmHash,
     TokenWasmHash,
     ClWasmHash,                     // WASM hash for concentrated_liquidity deployments
-    PoolCount,                      // u64 monotonic counter — AMM pools only; also derives deploy salts
-    GovernanceFor(Address),         // pool address → Option<Address>
+    PoolCount, // u64 monotonic counter — AMM pools only; also derives deploy salts
+    GovernanceFor(Address), // pool address → Option<Address>
     ClPool(Address, Address, i128), // normalized (token_a, token_b, fee_bps) → CL pool Address
-    ClPoolByIndex(u64),             // u64 index -> CL pool Address (issue #493: separate from PoolByIndex)
+    ClPoolByIndex(u64), // u64 index -> CL pool Address (issue #493: separate from PoolByIndex)
     ClPoolCount, // u64 monotonic counter for CL pools — independent of PoolCount (issue #493)
-    PermissionlessMode,             // bool — true = anyone can create pools (with fee)
-    PoolCreationFee,                // i128 — fee charged per pool in permissionless mode
-    FeeToken,                       // Address — token used to pay the pool creation fee
-    RateLimitLedgers,               // u32 — minimum ledgers between pool creations per address
-    LastPoolCreation(Address),      // u32 — ledger when this address last created a pool
-    DefaultFeeTier,                 // i128 — default fee tier ID (0-3) for new pool deployments
-    Treasury,                       // Address — protocol treasury for fee sweeps
-    GlobalProtocolFeeBps,           // i128 — global protocol fee rate (0 = off)
-    PoolTokens(Address),            // pool address → (token_a, token_b) for sweep forwarding
-    CreationPaused,                 // bool — true blocks new V2 and CL pool creation
+    PermissionlessMode, // bool — true = anyone can create pools (with fee)
+    PoolCreationFee, // i128 — fee charged per pool in permissionless mode
+    FeeToken,  // Address — token used to pay the pool creation fee
+    RateLimitLedgers, // u32 — minimum ledgers between pool creations per address
+    LastPoolCreation(Address), // u32 — ledger when this address last created a pool
+    DefaultFeeTier, // i128 — default fee tier ID (0-3) for new pool deployments
+    Treasury,  // Address — protocol treasury for fee sweeps
+    GlobalProtocolFeeBps, // i128 — global protocol fee rate (0 = off)
+    PoolTokens(Address), // pool address → (token_a, token_b) for sweep forwarding
+    CreationPaused, // bool — true blocks new V2 and CL pool creation
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -549,7 +549,9 @@ impl Factory {
             .get(&DataKey::ClPoolCount)
             .unwrap_or(0);
         let cl_salt = Self::make_salt(&env, n * 3 + 2 + 0x8000_0000_0000_0000);
-        env.storage().instance().set(&DataKey::ClPoolCount, &(n + 1));
+        env.storage()
+            .instance()
+            .set(&DataKey::ClPoolCount, &(n + 1));
 
         let pool_addr = env
             .deployer()
