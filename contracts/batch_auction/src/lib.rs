@@ -358,15 +358,22 @@ impl BatchAuction {
 
     /// Settle the current batch atomically.
     ///
-    /// Callable by anyone once the batch window has elapsed. All pending orders
-    /// execute sequentially within a single transaction — no external trade can
-    /// be inserted between them, which structurally prevents sandwich attacks.
+    /// Callable by anyone once the batch window has elapsed. Pending orders
+    /// are processed sequentially within a single transaction — no external
+    /// trade can be inserted between them, which structurally prevents
+    /// sandwich attacks.
     ///
-    /// If any individual swap fails (e.g. `min_out` not met), the entire
-    /// settlement reverts and escrowed funds are automatically returned by the
-    /// Soroban runtime.
+    /// Each order's swap is attempted in isolation (issue #473): if an order
+    /// has become unfillable at settlement time (its `min_out` can no longer
+    /// be met, its venue is paused, or in-range liquidity is insufficient),
+    /// that single order is skipped — its escrow is refunded to the trader
+    /// and it is dropped from the batch — instead of reverting the whole
+    /// settlement and freezing every other trader's escrow.
     ///
-    /// Returns the output amounts for each order in submission order.
+    /// Returns the output amounts for each order that settled successfully,
+    /// in submission order. Orders that failed and were refunded are omitted;
+    /// callers should compare against [`get_pending_orders`] before and after
+    /// to see which orders failed, and use `order_failed` events to react.
     pub fn settle_batch(env: Env) -> Result<Vec<i128>, AuctionError> {
         let opened_at: u64 = env
             .storage()
@@ -413,17 +420,36 @@ impl BatchAuction {
             // Execute the swap on behalf of the batch auction contract, routing
             // to whichever supported venue gives the best output. Authorization
             // for the token pull (auction → pool) is automatically satisfied
-            // because the batch_auction is the invoking contract.
-            let amount_out = Self::execute_op(&env, &order, &auction_addr, settlement_deadline);
-
-            // Forward output tokens to the original trader.
-            SepTokenClient::new(&env, &order.token_out).transfer(
-                &auction_addr,
-                &order.trader,
-                &amount_out,
-            );
-
-            results.push_back(amount_out);
+            // because the batch_auction is the invoking contract. A failure
+            // here (min_out no longer met, venue paused, insufficient in-range
+            // liquidity) is isolated to this order rather than reverting the
+            // whole batch (issue #473).
+            match Self::execute_op(&env, &order, &auction_addr, settlement_deadline) {
+                Ok(amount_out) => {
+                    // Forward output tokens to the original trader.
+                    SepTokenClient::new(&env, &order.token_out).transfer(
+                        &auction_addr,
+                        &order.trader,
+                        &amount_out,
+                    );
+                    results.push_back(amount_out);
+                }
+                Err(()) => {
+                    // Unfillable order: the failed swap attempt was rolled back
+                    // by the runtime, so the full escrow is still held by the
+                    // auction contract. Refund it and drop the order instead of
+                    // letting it block every other trader's settlement.
+                    SepTokenClient::new(&env, &order.token_in).transfer(
+                        &auction_addr,
+                        &order.trader,
+                        &order.amount_in,
+                    );
+                    env.events().publish(
+                        (Symbol::new(&env, "order_failed"), order.trader.clone()),
+                        (order_id,),
+                    );
+                }
+            }
             env.storage().instance().remove(&DataKey::Order(order_id));
         }
 
@@ -468,19 +494,24 @@ impl BatchAuction {
     /// less than `amount_in` (a concentrated-liquidity pool can fill partially
     /// once it exhausts in-range liquidity), the unspent escrow is refunded to
     /// the trader so no funds are stranded in the auction contract.
-    fn execute_op(env: &Env, order: &Order, sender: &Address, deadline: u64) -> i128 {
+    ///
+    /// Calls the venue through its `try_` entry point (issue #473): a pool
+    /// error (slippage/`min_out` not met, paused, insufficient liquidity) is
+    /// returned as `Err(())` instead of escalating to a host panic, so the
+    /// caller can isolate the failure to this one order.
+    fn execute_op(env: &Env, order: &Order, sender: &Address, deadline: u64) -> Result<i128, ()> {
         let (_, venue, venue_type) = Self::best_venue(env, order);
 
         let spent_before = SepTokenClient::new(env, &order.token_in).balance(sender);
-        let amount_out = match venue_type {
-            PoolType::Amm => AmmPoolClient::new(env, &venue).swap(
+        let swap_result = match venue_type {
+            PoolType::Amm => AmmPoolClient::new(env, &venue).try_swap(
                 sender,
                 &order.token_in,
                 &order.amount_in,
                 &order.min_out,
                 &deadline,
             ),
-            PoolType::Cl => ConcentratedLiquidityClient::new(env, &venue).swap(
+            PoolType::Cl => ConcentratedLiquidityClient::new(env, &venue).try_swap(
                 sender,
                 &order.zero_for_one,
                 &order.amount_in,
@@ -488,6 +519,10 @@ impl BatchAuction {
                 &order.min_out,
                 &deadline,
             ),
+        };
+        let amount_out = match swap_result {
+            Ok(Ok(amount_out)) => amount_out,
+            _ => return Err(()),
         };
         let spent_after = SepTokenClient::new(env, &order.token_in).balance(sender);
 
@@ -498,7 +533,7 @@ impl BatchAuction {
             SepTokenClient::new(env, &order.token_in).transfer(sender, &order.trader, &unspent);
         }
 
-        amount_out
+        Ok(amount_out)
     }
 
     /// Pick the venue that quotes the most output for `order`.
@@ -888,6 +923,62 @@ mod tests {
         // Both traders received token_b.
         assert!(StellarTokenClient::new(&env, &tb).balance(&trader1) > 0);
         assert!(StellarTokenClient::new(&env, &tb).balance(&trader2) > 0);
+    }
+
+    // ── Issue #473: an unfillable order must not block the rest of the batch ──
+
+    #[test]
+    fn test_unfillable_order_is_refunded_and_does_not_block_batch() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, pool, admin) = setup(&env);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let good_trader = Address::generate(&env);
+        let bad_trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&good_trader, &10_000_i128);
+        StellarAssetClient::new(&env, &ta).mint(&bad_trader, &10_000_i128);
+
+        // An impossibly high min_out: this order can never clear at
+        // settlement, no matter how the pool moves.
+        client.submit_order(
+            &bad_trader,
+            &pool,
+            &ta,
+            &tb,
+            &5_000_i128,
+            &1_000_000_000_i128,
+            &u64::MAX,
+        );
+        client.submit_order(&good_trader, &pool, &ta, &tb, &5_000_i128, &0_i128, &u64::MAX);
+
+        env.ledger().set_timestamp(1031);
+
+        // Previously this reverted the whole batch, locking both escrows.
+        let results = client.settle_batch();
+
+        // Only the fillable order settled.
+        assert_eq!(results.len(), 1);
+        assert!(results.get(0).unwrap() > 0);
+
+        // The good trader received token_b.
+        assert!(StellarTokenClient::new(&env, &tb).balance(&good_trader) > 0);
+
+        // The unfillable order's escrow was refunded in full, not stranded.
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&bad_trader),
+            10_000_i128
+        );
+        assert_eq!(StellarTokenClient::new(&env, &tb).balance(&bad_trader), 0);
+
+        // Both orders are cleared from the batch — the bad one is not left
+        // pending to jam every future settlement attempt.
+        assert_eq!(client.get_pending_orders().len(), 0);
     }
 
     #[test]
