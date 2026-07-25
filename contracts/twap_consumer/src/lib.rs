@@ -33,6 +33,11 @@ pub enum DataKey {
     Keeper,
     Snapshot(Address, u64),
     TrackedPoolsPersistent,
+    /// Sorted (ascending, deduplicated) ledger timestamps at which a snapshot
+    /// was saved for this pool. Lets `get_twap_*` binary-search for the most
+    /// recent snapshot at or before an arbitrary `then_ts` instead of
+    /// requiring an exact-timestamp hit (issue #469).
+    SnapshotTimestamps(Address),
 }
 
 #[contracttype]
@@ -94,6 +99,7 @@ impl TwapConsumer {
             Self::SNAPSHOT_TTL_LEDGERS / 2,
             Self::SNAPSHOT_TTL_LEDGERS,
         );
+        Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
 
         let mut tracked: Vec<Address> = env
             .storage()
@@ -126,11 +132,77 @@ impl TwapConsumer {
         Self::require_keeper(&env)?;
         let key = DataKey::Snapshot(pool.clone(), ledger_ts);
         env.storage().persistent().remove(&key);
+        Self::remove_snapshot_timestamp(&env, &pool, ledger_ts);
         env.events().publish(
             (symbol_short!("snap_del"), pool),
             ledger_ts,
         );
         Ok(())
+    }
+
+    /// Record `ts` in the pool's sorted snapshot-timestamp index. Ledger
+    /// timestamps are non-decreasing across calls, so appending keeps the
+    /// index sorted; skip if `ts` is already the most recent entry so a
+    /// keeper re-saving within the same ledger doesn't create a duplicate.
+    fn record_snapshot_timestamp(env: &Env, pool: &Address, ts: u64) {
+        let key = DataKey::SnapshotTimestamps(pool.clone());
+        let mut timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if timestamps.last().map_or(true, |last| last != ts) {
+            timestamps.push_back(ts);
+        }
+        env.storage().persistent().set(&key, &timestamps);
+        env.storage().persistent().extend_ttl(
+            &key,
+            Self::SNAPSHOT_TTL_LEDGERS / 2,
+            Self::SNAPSHOT_TTL_LEDGERS,
+        );
+    }
+
+    fn remove_snapshot_timestamp(env: &Env, pool: &Address, ts: u64) {
+        let key = DataKey::SnapshotTimestamps(pool.clone());
+        let timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut updated: Vec<u64> = Vec::new(env);
+        for i in 0..timestamps.len() {
+            let t = timestamps.get(i).unwrap();
+            if t != ts {
+                updated.push_back(t);
+            }
+        }
+        env.storage().persistent().set(&key, &updated);
+    }
+
+    /// Binary-search the pool's snapshot-timestamp index for the most recent
+    /// entry at or before `then_ts` (the "floor"). Returns `None` if no
+    /// snapshot that old exists.
+    fn floor_snapshot_ts(env: &Env, pool: &Address, then_ts: u64) -> Option<u64> {
+        let timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SnapshotTimestamps(pool.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        let mut lo: u32 = 0;
+        let mut hi: u32 = timestamps.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if timestamps.get(mid).unwrap() <= then_ts {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo == 0 {
+            None
+        } else {
+            Some(timestamps.get(lo - 1).unwrap())
+        }
     }
 
     pub fn get_twap_price(env: Env, pool: Address, window_seconds: u64) -> Result<i128, TwapError> {
@@ -144,10 +216,12 @@ impl TwapConsumer {
             return Err(TwapError::InsufficientHistory);
         }
         let then_ts = ledger_ts_now - window_seconds;
+        let floor_ts =
+            Self::floor_snapshot_ts(&env, &pool, then_ts).ok_or(TwapError::InsufficientHistory)?;
         let snapshot: PriceSnapshot = env
             .storage()
             .persistent()
-            .get(&DataKey::Snapshot(pool.clone(), then_ts))
+            .get(&DataKey::Snapshot(pool.clone(), floor_ts))
             .ok_or(TwapError::NoSnapshotFound)?;
 
         let delta_a = (cum_a_now as u128).wrapping_sub(snapshot.cum_a as u128) as i128;
@@ -233,10 +307,12 @@ impl TwapConsumer {
             return Err(TwapError::InsufficientHistory);
         }
         let then_ts = ledger_ts_now - window_seconds;
+        let floor_ts =
+            Self::floor_snapshot_ts(&env, &pool, then_ts).ok_or(TwapError::InsufficientHistory)?;
         let snapshot: PriceSnapshot = env
             .storage()
             .persistent()
-            .get(&DataKey::Snapshot(pool.clone(), then_ts))
+            .get(&DataKey::Snapshot(pool.clone(), floor_ts))
             .ok_or(TwapError::NoSnapshotFound)?;
 
         let delta_a = (cum_a_now as u128).wrapping_sub(snapshot.cum_a as u128) as i128;
@@ -276,10 +352,12 @@ impl TwapConsumer {
             return Err(TwapError::InsufficientHistory);
         }
         let then_ts = ledger_ts_now - window_seconds;
+        let floor_ts =
+            Self::floor_snapshot_ts(&env, &pool, then_ts).ok_or(TwapError::InsufficientHistory)?;
         let snapshot: PriceSnapshot = env
             .storage()
             .persistent()
-            .get(&DataKey::Snapshot(pool.clone(), then_ts))
+            .get(&DataKey::Snapshot(pool.clone(), floor_ts))
             .ok_or(TwapError::NoSnapshotFound)?;
 
         let cum_then = snapshot.cum_a as i64;
@@ -299,13 +377,14 @@ impl TwapConsumer {
             cum_b: 0,
             pool_ts,
         };
-        let key = DataKey::Snapshot(pool, ledger_ts);
+        let key = DataKey::Snapshot(pool.clone(), ledger_ts);
         env.storage().persistent().set(&key, &snapshot);
         env.storage().persistent().extend_ttl(
             &key,
             Self::SNAPSHOT_TTL_LEDGERS / 2,
             Self::SNAPSHOT_TTL_LEDGERS,
         );
+        Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
         Ok(())
     }
 }
@@ -731,8 +810,74 @@ mod tests {
 
         consumer.delete_snapshot(&amm_addr, &10_000);
 
+        // The only snapshot at/before then_ts=10_000 was removed from the
+        // timestamp index along with the snapshot itself, so there is no
+        // floor entry left — this is now InsufficientHistory rather than
+        // NoSnapshotFound (issue #469).
         let result = consumer.try_get_twap_price(&amm_addr, &60_u64);
-        assert_eq!(result, Err(Ok(TwapError::NoSnapshotFound)));
+        assert_eq!(result, Err(Ok(TwapError::InsufficientHistory)));
+    }
+
+    // ── Issue #469: arbitrary window_seconds should hit the nearest older
+    // snapshot instead of requiring an exact-timestamp match ──────────────────
+
+    #[test]
+    fn test_get_twap_price_with_arbitrary_window_uses_floor_snapshot() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(10_000);
+
+        let admin = Address::generate(&env);
+        let amm_addr = env.register_contract(None, AmmPool);
+        let lp_addr = env.register_contract(None, LpToken);
+        let consumer_addr = env.register_contract(None, TwapConsumer);
+
+        token::LpTokenClient::new(&env, &lp_addr).initialize(
+            &amm_addr,
+            &soroban_sdk::String::from_str(&env, "AMM LP Token"),
+            &soroban_sdk::String::from_str(&env, "ALP"),
+            &7u32,
+        );
+
+        let (ta, ta_sac) = create_sac(&env, &admin);
+        let (tb, tb_sac) = create_sac(&env, &admin);
+
+        let amm = AmmPoolClient::new(&env, &amm_addr);
+        amm.initialize(&admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128);
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &2_000_000_i128);
+        tb_sac.mint(&provider, &2_000_000_i128);
+        amm.add_liquidity(&provider, &2_000_000_i128, &2_000_000_i128, &0_i128, &10_000_u64);
+
+        let consumer = TwapConsumerClient::new(&env, &consumer_addr);
+        consumer.initialize(&admin);
+        consumer.save_snapshot(&amm_addr);
+
+        // A trade moves the pool's cumulative price, then a second snapshot
+        // is saved 30s after the first (at ts=10_030).
+        env.ledger().set_timestamp(10_030);
+        let whale = Address::generate(&env);
+        ta_sac.mint(&whale, &2_000_000_i128);
+        amm.swap(&whale, &ta.address, &1_000_000_i128, &0_i128, &10_030_u64);
+        consumer.save_snapshot(&amm_addr);
+
+        // A second trade 45s later advances the pool's own cumulative
+        // timestamp without a matching snapshot, so both queries below have
+        // a positive `elapsed` against their respective floor snapshot.
+        env.ledger().set_timestamp(10_075);
+        amm.swap(&whale, &ta.address, &1_000_000_i128, &0_i128, &10_075_u64);
+
+        // Query with window=45 at ts=10_075: then_ts = 10_030, an exact hit on
+        // the second snapshot, exercising the common case handled today.
+        let exact_hit = consumer.get_twap_price(&amm_addr, &45_u64);
+        assert!(exact_hit > 0);
+
+        // Query with window=50 at ts=10_075: then_ts = 10_025, which has no
+        // exact snapshot. Previously this reverted with NoSnapshotFound; now
+        // it must fall back to the floor (the ts=10_000 snapshot) instead.
+        let floor_hit = consumer.get_twap_price(&amm_addr, &50_u64);
+        assert!(floor_hit > 0);
     }
 
     #[test]
