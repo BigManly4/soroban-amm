@@ -435,6 +435,43 @@ fn test_set_protocol_fee_works_after_initialize() {
     assert_eq!(stored_bps, 10);
 }
 
+/// Regression test for M-02: setting protocol_fee_bps == fee_bps must be rejected
+/// so that LPs always retain a portion of swap income.
+#[test]
+fn test_set_protocol_fee_rejects_full_capture() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let fee_recipient = Address::generate(&env);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    // fee_bps = 30
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &fee_recipient,
+        &0_i128,
+    );
+
+    // protocol_fee_bps == fee_bps (30) must be rejected (M-02 fix).
+    let result = amm.try_set_protocol_fee(&admin, &fee_recipient, &30_i128);
+    assert!(result.is_err(), "protocol_fee_bps == fee_bps must be rejected");
+
+    // protocol_fee_bps > fee_bps must still be rejected.
+    let result2 = amm.try_set_protocol_fee(&admin, &fee_recipient, &31_i128);
+    assert!(result2.is_err(), "protocol_fee_bps > fee_bps must be rejected");
+
+    // A valid strict value (29) must still be accepted.
+    let result3 = amm.try_set_protocol_fee(&admin, &fee_recipient, &29_i128);
+    assert!(result3.is_ok(), "protocol_fee_bps < fee_bps must be accepted");
+
+    // Zero protocol fee must always be accepted regardless of fee_bps.
+    let result4 = amm.try_set_protocol_fee(&admin, &fee_recipient, &0_i128);
+    assert!(result4.is_ok(), "protocol_fee_bps == 0 must always be accepted");
+}
+
 #[test]
 fn test_add_and_swap() {
     let ts = setup_pool(30);
@@ -1177,6 +1214,25 @@ fn test_fee_bps_max_succeeds() {
     let result = Swap::new(&amm, &trader, &ts.ta_addr, 100_000).try_execute();
     assert!(result.is_ok());
     assert_eq!(result.unwrap().unwrap(), 0);
+}
+
+#[test]
+fn test_get_amount_in_max_fee_does_not_panic() {
+    // With fee_bps=10_000 the `(10_000 - fee_bps)` divisor is zero. The quote
+    // must return 0 instead of trapping on a division by zero.
+    let ts = setup_pool(10_000);
+    let env = &ts.env;
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &1_000_000_i128);
+    tb_sac.mint(&provider, &1_000_000_i128);
+    AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
+
+    let quoted_in = amm.get_amount_in(&ts.tb_addr, &1_000);
+    assert_eq!(quoted_in, 0);
 }
 
 // ── Edge cases: minimum share precision ───────────────────────────────────────

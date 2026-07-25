@@ -36,6 +36,9 @@ const DEFAULT_MAX_BOOST: i128 = 25_000;
 /// Minimum boost multiplier (1×, stored as 10_000 / BOOST_SCALE).
 const MIN_BOOST: i128 = BOOST_SCALE;
 
+const MIN_TTL: u32 = 518_400;   // ~30 days (at 5s per ledger)
+const BUMP_TO: u32 = 3_110_400; // ~180 days (at 5s per ledger)
+
 // ── Storage keys ───────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -68,6 +71,12 @@ pub enum DataKey {
     ConfigMinLockDuration,
     /// Configurable max lock duration in seconds.
     ConfigMaxLockDuration,
+    /// Optional maximum reward pool balance (0 = no cap).
+    ConfigMaxRewardPoolBalance,
+    /// Circuit-breaker flag; when true new stakes and claims are halted (#360).
+    Paused,
+    /// Emergency mode flag; when true stakers may reclaim LP without rewards (#359).
+    EmergencyMode,
 }
 
 // ── Data structures ───────────────────────────────────────────────────────
@@ -121,6 +130,7 @@ impl Staking {
         env.storage().instance().set(&DataKey::TotalEffectiveStaked, &0i128);
         env.storage().instance().set(&DataKey::AccumulatedRewardsPerShare, &0i128);
         env.storage().instance().set(&DataKey::RewardPoolBalance, &0i128);
+        // ConfigMaxRewardPoolBalance initialized above
         Self::_write_boost_config(&env, MIN_BOOST, DEFAULT_MAX_BOOST, MIN_LOCK_DURATION, MAX_LOCK_DURATION);
     }
 
@@ -147,6 +157,7 @@ impl Staking {
         env.storage().instance().set(&DataKey::TotalEffectiveStaked, &0i128);
         env.storage().instance().set(&DataKey::AccumulatedRewardsPerShare, &0i128);
         env.storage().instance().set(&DataKey::RewardPoolBalance, &0i128);
+        env.storage().instance().set(&DataKey::ConfigMaxRewardPoolBalance, &0i128);
         Self::_write_boost_config(
             &env,
             min_boost_scaled,
@@ -217,12 +228,13 @@ impl Staking {
             .instance()
             .set(&DataKey::TotalEffectiveStaked, &(total - old_effective + new_effective).max(0));
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::LockExpiry(staker.clone()), &expiry);
-        env.storage()
-            .persistent()
-            .set(&DataKey::BoostMultiplier(staker.clone()), &boost);
+        let key_lock = DataKey::LockExpiry(staker.clone());
+        env.storage().persistent().set(&key_lock, &expiry);
+        env.storage().persistent().extend_ttl(&key_lock, MIN_TTL, BUMP_TO);
+
+        let key_boost = DataKey::BoostMultiplier(staker.clone());
+        env.storage().persistent().set(&key_boost, &boost);
+        env.storage().persistent().extend_ttl(&key_boost, MIN_TTL, BUMP_TO);
 
         let acc_per_share: i128 = env
             .storage()
@@ -230,9 +242,9 @@ impl Staking {
             .get(&DataKey::AccumulatedRewardsPerShare)
             .unwrap_or(0);
         let new_debt = new_effective * acc_per_share / SCALE_FACTOR;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StakerRewardsDebt(staker.clone()), &new_debt);
+        let key_debt = DataKey::StakerRewardsDebt(staker.clone());
+        env.storage().persistent().set(&key_debt, &new_debt);
+        env.storage().persistent().extend_ttl(&key_debt, MIN_TTL, BUMP_TO);
 
         env.events().publish(
             (Symbol::new(&env, "lock_extended"),),
@@ -273,18 +285,55 @@ impl Staking {
 
         let reward_token: Address = env.storage().instance().get(&DataKey::RewardToken).unwrap();
         let pool_addr = env.current_contract_address();
-        SepTokenClient::new(&env, &reward_token).transfer(&admin, &pool_addr, &amount);
+        // Record pre‑transfer token balance
+        let token_client = SepTokenClient::new(&env, &reward_token);
+        let pre_balance: i128 = token_client.balance(&pool_addr);
+        // Transfer requested amount from admin to pool
+        token_client.transfer(&admin, &pool_addr, &amount);
+        // Record post‑transfer token balance to determine actual received amount
+        let post_balance: i128 = token_client.balance(&pool_addr);
+        let received: i128 = post_balance - pre_balance;
+        // Update reward pool balance with the actual received amount
+        let current_balance: i128 = env.storage().instance().get(&DataKey::RewardPoolBalance).unwrap_or(0);
+        let new_balance = current_balance + received;
+        // Enforce optional max reward pool balance cap (0 = no cap)
+        let max_balance: i128 = env.storage().instance().get(&DataKey::ConfigMaxRewardPoolBalance).unwrap_or(0);
+        if max_balance != 0 {
+            assert!(new_balance <= max_balance, "exceeds max reward pool balance");
+        }
+        env.storage().instance().set(&DataKey::RewardPoolBalance, &new_balance);
+        // Emit event with the actual amount added
+        env.events().publish((Symbol::new(&env, "rewards_added"),), (admin, received));
+    }
 
-        let current_balance: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RewardPoolBalance)
-            .unwrap_or(0);
+    /// Halt new stakes and reward claims. Admin only (#360).
+    ///
+    /// Lets the admin freeze the contract (e.g. while a reward-accounting bug
+    /// is being patched). Unstaking and emergency withdrawals remain available
+    /// so stakers can always retrieve their LP tokens.
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert!(admin == stored_admin, "not admin");
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "paused"),), (admin,));
+    }
+
+    /// Resume staking and claiming. Admin only (#360).
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert!(admin == stored_admin, "not admin");
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((Symbol::new(&env, "unpaused"),), (admin,));
+    }
+
+    /// Whether the contract is currently paused (#360).
+    pub fn is_paused(env: Env) -> bool {
         env.storage()
             .instance()
-            .set(&DataKey::RewardPoolBalance, &(current_balance + amount));
-
-        env.events().publish((Symbol::new(&env, "rewards_added"),), (admin, amount));
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     /// Stake LP tokens without a lock (1× boost).
@@ -301,6 +350,7 @@ impl Staking {
     /// If the staker already has a lock, the new lock must expire no earlier
     /// than the existing one (locks can only be extended, not shortened).
     pub fn stake_locked(env: Env, staker: Address, amount: i128, lock_duration_secs: u64) {
+        assert!(!Self::is_paused(env.clone()), "contract is paused");
         staker.require_auth();
         assert!(amount > 0, "amount must be positive");
 
@@ -341,12 +391,20 @@ impl Staking {
             .get(&DataKey::StakerAmount(staker.clone()))
             .unwrap_or(0);
         let new_staked = current_staked + amount;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StakerAmount(staker.clone()), &new_staked);
+        let key_amount = DataKey::StakerAmount(staker.clone());
+        env.storage().persistent().set(&key_amount, &new_staked);
+        env.storage().persistent().extend_ttl(&key_amount, MIN_TTL, BUMP_TO);
 
-        // Recompute effective amount for the whole position with the new boost.
-        let old_effective = Self::_effective_amount(current_staked, new_boost);
+        // Remove the position's existing contribution using the boost it was
+        // actually recorded with, not the freshly recomputed one — otherwise
+        // TotalEffectiveStaked (Σ raw_amount × stored_boost) is corrupted
+        // whenever the boost changes on a top-up (issue #467).
+        let old_boost: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BoostMultiplier(staker.clone()))
+            .unwrap_or(MIN_BOOST);
+        let old_effective = Self::_effective_amount(current_staked, old_boost);
         let new_effective = Self::_effective_amount(new_staked, new_boost);
 
         // Adjust total effective staked.
@@ -362,12 +420,13 @@ impl Staking {
             .set(&DataKey::TotalEffectiveStaked, &new_total.max(0));
 
         // Persist lock and boost.
-        env.storage()
-            .persistent()
-            .set(&DataKey::LockExpiry(staker.clone()), &new_expiry);
-        env.storage()
-            .persistent()
-            .set(&DataKey::BoostMultiplier(staker.clone()), &new_boost);
+        let key_lock = DataKey::LockExpiry(staker.clone());
+        env.storage().persistent().set(&key_lock, &new_expiry);
+        env.storage().persistent().extend_ttl(&key_lock, MIN_TTL, BUMP_TO);
+
+        let key_boost = DataKey::BoostMultiplier(staker.clone());
+        env.storage().persistent().set(&key_boost, &new_boost);
+        env.storage().persistent().extend_ttl(&key_boost, MIN_TTL, BUMP_TO);
 
         // Reset rewards debt to current acc_per_share * new_effective.
         let acc_per_share: i128 = env
@@ -376,9 +435,9 @@ impl Staking {
             .get(&DataKey::AccumulatedRewardsPerShare)
             .unwrap_or(0);
         let new_debt = new_effective * acc_per_share / SCALE_FACTOR;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StakerRewardsDebt(staker.clone()), &new_debt);
+        let key_debt = DataKey::StakerRewardsDebt(staker.clone());
+        env.storage().persistent().set(&key_debt, &new_debt);
+        env.storage().persistent().extend_ttl(&key_debt, MIN_TTL, BUMP_TO);
 
         env.events().publish(
             (Symbol::new(&env, "staked"),),
@@ -388,6 +447,7 @@ impl Staking {
 
     /// Claim accrued rewards without unstaking.
     pub fn claim(env: Env, staker: Address) -> i128 {
+        assert!(!Self::is_paused(env.clone()), "contract is paused");
         staker.require_auth();
         Self::_claim_rewards(&env, &staker)
     }
@@ -436,9 +496,9 @@ impl Staking {
         let new_staked = staked_amount - amount;
         let new_effective = Self::_effective_amount(new_staked, boost);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::StakerAmount(staker.clone()), &new_staked);
+        let key_amount = DataKey::StakerAmount(staker.clone());
+        env.storage().persistent().set(&key_amount, &new_staked);
+        env.storage().persistent().extend_ttl(&key_amount, MIN_TTL, BUMP_TO);
 
         let total: i128 = env
             .storage()
@@ -456,12 +516,113 @@ impl Staking {
             .get(&DataKey::AccumulatedRewardsPerShare)
             .unwrap_or(0);
         let new_debt = new_effective * acc_per_share / SCALE_FACTOR;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StakerRewardsDebt(staker.clone()), &new_debt);
+        let key_debt = DataKey::StakerRewardsDebt(staker.clone());
+        env.storage().persistent().set(&key_debt, &new_debt);
+        env.storage().persistent().extend_ttl(&key_debt, MIN_TTL, BUMP_TO);
 
         env.events().publish((Symbol::new(&env, "unstaked"),), (staker, amount, rewards));
         (amount, rewards)
+    }
+
+    /// Enable or disable emergency mode (#359). Admin only.
+    ///
+    /// Emergency mode unlocks [`Self::emergency_withdraw`] so stakers can
+    /// reclaim their LP tokens without touching the reward token. It is gated
+    /// behind the admin so it cannot be used to skip rewards under normal
+    /// conditions.
+    pub fn set_emergency_mode(env: Env, admin: Address, enabled: bool) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert!(admin == stored_admin, "not admin");
+        env.storage().instance().set(&DataKey::EmergencyMode, &enabled);
+        env.events()
+            .publish((Symbol::new(&env, "emergency_mode"),), (admin, enabled));
+    }
+    
+    /// Set the optional maximum reward pool balance. Admin only.
+    pub fn set_max_reward_pool_balance(env: Env, admin: Address, max_balance: i128) {
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert!(admin == stored_admin, "not admin");
+        let current_balance: i128 = env.storage().instance().get(&DataKey::RewardPoolBalance).unwrap_or(0);
+        // 0 means no cap; otherwise ensure the new cap is not below current balance
+        assert!(max_balance == 0 || max_balance >= current_balance, "max_balance less than current pool");
+        env.storage().instance().set(&DataKey::ConfigMaxRewardPoolBalance, &max_balance);
+        env.events().publish((Symbol::new(&env, "max_reward_pool_balance_set"),), (admin, max_balance));
+    }
+
+
+    /// Whether emergency mode is currently active (#359).
+    pub fn is_emergency_mode(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyMode)
+            .unwrap_or(false)
+    }
+
+    /// Reclaim staked LP tokens without claiming rewards (#359).
+    ///
+    /// Only callable while the admin has enabled emergency mode. Unlike
+    /// [`Self::unstake`], this never interacts with the reward token, so
+    /// stakers can always recover their LP even if the reward token is paused,
+    /// blacklisted, or the reward pool has been drained by a bug. Any pending
+    /// rewards are forfeited, and the lock (if any) is ignored.
+    ///
+    /// Returns the raw LP amount returned to the staker.
+    pub fn emergency_withdraw(env: Env, staker: Address) -> i128 {
+        staker.require_auth();
+        assert!(
+            Self::is_emergency_mode(env.clone()),
+            "emergency mode not active"
+        );
+
+        let staked_amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakerAmount(staker.clone()))
+            .unwrap_or(0);
+        assert!(staked_amount > 0, "nothing staked");
+
+        // Remove this staker's effective contribution from the global total.
+        let boost: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BoostMultiplier(staker.clone()))
+            .unwrap_or(MIN_BOOST);
+        let effective = Self::_effective_amount(staked_amount, boost);
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalEffectiveStaked)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalEffectiveStaked, &(total - effective).max(0));
+
+        // Zero out the staker's position, debt, boost, and lock.
+        env.storage()
+            .persistent()
+            .set(&DataKey::StakerAmount(staker.clone()), &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::StakerRewardsDebt(staker.clone()), &0i128);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BoostMultiplier(staker.clone()), &MIN_BOOST);
+        env.storage()
+            .persistent()
+            .set(&DataKey::LockExpiry(staker.clone()), &0u64);
+
+        // Return the raw LP balance without touching the reward token.
+        let lp_token: Address = env.storage().instance().get(&DataKey::LpToken).unwrap();
+        let pool_addr = env.current_contract_address();
+        SepTokenClient::new(&env, &lp_token).transfer(&pool_addr, &staker, &staked_amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_withdraw"),),
+            (staker, staked_amount),
+        );
+        staked_amount
     }
 
     /// View pending rewards for a staker.
@@ -567,6 +728,7 @@ impl Staking {
             .instance()
             .get(&DataKey::RewardPoolBalance)
             .unwrap_or(0);
+        assert!(new_rewards <= pool_balance, "insufficient reward pool balance");
         env.storage()
             .instance()
             .set(&DataKey::RewardPoolBalance, &(pool_balance - new_rewards));
@@ -590,9 +752,9 @@ impl Staking {
             .get(&DataKey::AccumulatedRewardsPerShare)
             .unwrap_or(0);
         let new_debt = effective * acc_per_share / SCALE_FACTOR;
-        env.storage()
-            .persistent()
-            .set(&DataKey::StakerRewardsDebt(staker.clone()), &new_debt);
+        let key_debt = DataKey::StakerRewardsDebt(staker.clone());
+        env.storage().persistent().set(&key_debt, &new_debt);
+        env.storage().persistent().extend_ttl(&key_debt, MIN_TTL, BUMP_TO);
 
         SepTokenClient::new(env, &reward_token).transfer(&pool_addr, staker, &pending);
 
@@ -694,25 +856,42 @@ impl Staking {
         Self::_effective_amount(raw, boost)
     }
 
-    /// Settle pending rewards into debt without transferring (used before
-    /// changing effective stake so rewards earned so far are not lost).
+    /// Transfer any pending rewards to the staker before their effective stake
+    /// changes (used in stake_locked / extend_lock so rewards earned so far
+    /// are not lost when the debt is recomputed against the new effective amount).
     fn _settle_pending(env: &Env, staker: &Address) {
-        let effective = Self::_staker_effective(env, staker);
-        if effective == 0 {
+        let pending = Self::pending_rewards(env.clone(), staker.clone());
+        if pending == 0 {
             return;
         }
+
+        let reward_token: Address = env.storage().instance().get(&DataKey::RewardToken).unwrap();
+        let pool_addr = env.current_contract_address();
+
+        let effective = Self::_staker_effective(env, staker);
         let acc_per_share: i128 = env
             .storage()
             .instance()
             .get(&DataKey::AccumulatedRewardsPerShare)
             .unwrap_or(0);
-        // The current debt already accounts for previously settled rewards.
-        // We do NOT transfer here — just record what has been earned so far
-        // by updating the debt to the current acc_per_share level.
-        // Pending = effective * acc / SCALE - debt  (already owed to staker).
-        // We leave debt unchanged so pending_rewards still returns the right value.
-        // The actual settlement happens in claim() / unstake().
-        let _ = (effective, acc_per_share); // no-op: debt stays, rewards accumulate
+        let new_debt = effective * acc_per_share / SCALE_FACTOR;
+        let key_debt = DataKey::StakerRewardsDebt(staker.clone());
+        env.storage().persistent().set(&key_debt, &new_debt);
+        env.storage().persistent().extend_ttl(&key_debt, MIN_TTL, BUMP_TO);
+
+        SepTokenClient::new(env, &reward_token).transfer(&pool_addr, staker, &pending);
+
+        let pool_balance: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RewardPoolBalance)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::RewardPoolBalance, &(pool_balance - pending));
+
+        env.events()
+            .publish((Symbol::new(env, "claimed"),), (staker.clone(), pending));
     }
 }
 
@@ -783,6 +962,41 @@ mod tests {
 
         let pool = staking.get_pool_info();
         assert_eq!(pool.total_effective_staked, 2_500);
+    }
+
+    // ── Issue #467: stake_locked must remove the old effective stake using the
+    // boost the position was actually recorded with, not the freshly
+    // recomputed one, or TotalEffectiveStaked drifts on every top-up ────────────
+
+    #[test]
+    fn test_stake_locked_top_up_after_boost_decay_keeps_total_effective_staked_correct() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        let (_, staker, staking) = setup(&env);
+
+        // Lock for the max duration up front — boost starts at the maximum (2.5x).
+        staking.stake_locked(&staker, &1_000_i128, &MAX_LOCK_DURATION);
+        let info_before = staking.get_staker_info(&staker);
+        assert_eq!(info_before.boost_multiplier, DEFAULT_MAX_BOOST);
+
+        // Let half the lock elapse — the boost for the now-shorter remaining
+        // time is lower than the boost the position was recorded with.
+        env.ledger()
+            .set_timestamp(1_000 + MAX_LOCK_DURATION / 2);
+
+        // Top up without requesting a new lock (lock_duration_secs = 0): this
+        // recomputes the boost from the shrunken remaining lock time.
+        staking.stake_locked(&staker, &500_i128, &0);
+
+        let info_after = staking.get_staker_info(&staker);
+        assert!(info_after.boost_multiplier < DEFAULT_MAX_BOOST);
+
+        // With a single staker, TotalEffectiveStaked must equal this staker's
+        // own effective amount — the old, differently-boosted contribution
+        // must be fully replaced, not partially subtracted.
+        let pool = staking.get_pool_info();
+        assert_eq!(pool.total_effective_staked, info_after.effective_amount);
     }
 
     #[test]
@@ -860,6 +1074,76 @@ mod tests {
     }
 
     #[test]
+    /// Bug #420: staking or extending after rewards accrued must not forfeit
+    /// unclaimed rewards.  _settle_pending must transfer pending rewards before
+    /// the debt is recomputed against the new effective amount.
+    fn test_stake_twice_preserves_pending_rewards() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, staker, staking) = setup(&env);
+
+        // First stake
+        staking.stake(&staker, &1_000_i128);
+        staking.update_rewards(&admin, &100_i128);
+
+        let pending_before = staking.pending_rewards(&staker);
+        assert_eq!(pending_before, 100, "should have 100 pending after first distribution");
+
+        // Second stake — triggers _settle_pending which must pay out the 100
+        // before the debt is recomputed.
+        staking.stake(&staker, &500_i128);
+
+        // After the second stake, the new effective amount defines a fresh debt.
+        // Any rewards accrued before the second stake must have been paid out.
+        let pending_after = staking.pending_rewards(&staker);
+        assert_eq!(pending_after, 0, "no new rewards yet — second stake just happened");
+
+        // The staker's reward balance should have increased by the 100 that
+        // was pending before the second stake.
+        let reward_token = staking.get_pool_info().reward_token;
+        let reward_client = StellarTokenClient::new(&env, &reward_token);
+        assert_eq!(
+            reward_client.balance(&staker),
+            100,
+            "staker should have received the 100 pending rewards"
+        );
+    }
+
+    #[test]
+    fn test_extend_lock_preserves_pending_rewards() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, staker, staking) = setup(&env);
+
+        // Stake with a short lock so we can extend later.
+        let stake_amount = 4_000_i128;
+        let reward_amount = 4_000_i128;
+        staking.stake_locked(&staker, &stake_amount, &MIN_LOCK_DURATION);
+        staking.update_rewards(&admin, &reward_amount);
+
+        let pending_before = staking.pending_rewards(&staker);
+        assert!(pending_before > 0, "should have pending rewards before extend");
+
+        // Extend lock — triggers _settle_pending which must transfer the
+        // pending rewards before recomputing debt.
+        staking.extend_lock(&staker, &MAX_LOCK_DURATION);
+
+        // After settlement, no rewards should be pending (no new distributions).
+        let pending_after = staking.pending_rewards(&staker);
+        assert_eq!(pending_after, 0, "no new rewards after extend");
+
+        // The staker's reward balance must have increased by at least the
+        // pending amount (within integer-division rounding).
+        let reward_token = staking.get_pool_info().reward_token;
+        let reward_client = StellarTokenClient::new(&env, &reward_token);
+        let balance = reward_client.balance(&staker);
+        assert!(
+            balance >= pending_before,
+            "staker should have received at least {pending_before} pending rewards on extend, got {balance}"
+        );
+    }
+
+    #[test]
     fn test_stake_and_claim() {
         let env = Env::default();
         env.mock_all_auths();
@@ -874,5 +1158,142 @@ mod tests {
         let claimed = staking.claim(&staker);
         assert_eq!(claimed, 100);
         assert_eq!(staking.pending_rewards(&staker), 0);
+    }
+
+    // ── Pause / circuit-breaker tests (#360) ────────────────────────────────
+
+    #[test]
+    fn test_pause_blocks_stake_and_claim() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, staker, staking) = setup(&env);
+
+        staking.stake(&staker, &1_000_i128);
+        staking.update_rewards(&admin, &100_i128);
+
+        staking.pause(&admin);
+        assert!(staking.is_paused());
+
+        // New stakes and claims are halted while paused.
+        assert!(staking.try_stake(&staker, &500_i128).is_err());
+        assert!(staking
+            .try_stake_locked(&staker, &500_i128, &MIN_LOCK_DURATION)
+            .is_err());
+        assert!(staking.try_claim(&staker).is_err());
+    }
+
+    #[test]
+    fn test_unpause_restores_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, staker, staking) = setup(&env);
+
+        staking.pause(&admin);
+        assert!(staking.try_stake(&staker, &1_000_i128).is_err());
+
+        staking.unpause(&admin);
+        assert!(!staking.is_paused());
+
+        staking.stake(&staker, &1_000_i128);
+        staking.update_rewards(&admin, &100_i128);
+        assert_eq!(staking.claim(&staker), 100);
+    }
+
+    #[test]
+    fn test_unstake_works_while_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, staker, staking) = setup(&env);
+
+        staking.stake(&staker, &1_000_i128);
+        staking.pause(&admin);
+
+        // Stakers must always be able to retrieve their LP tokens.
+        let (lp_returned, _) = staking.unstake(&staker, &1_000_i128);
+        assert_eq!(lp_returned, 1_000);
+    }
+
+    #[test]
+    fn test_pause_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, staker, staking) = setup(&env);
+
+        assert!(staking.try_pause(&staker).is_err());
+    }
+
+    // ── Emergency mode tests (#359) ─────────────────────────────────────────
+
+    #[test]
+    fn test_emergency_withdraw_disabled_by_default_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, staker, staking) = setup(&env);
+
+        staking.stake(&staker, &1_000_i128);
+
+        // Emergency mode is off by default — withdrawal must be rejected.
+        assert!(!staking.is_emergency_mode());
+        let result = staking.try_emergency_withdraw(&staker);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_emergency_withdraw_returns_lp_without_rewards() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, staker, staking) = setup(&env);
+
+        let lp_token = staking.get_pool_info().lp_token;
+        let reward_token = staking.get_pool_info().reward_token;
+        let lp_client = StellarTokenClient::new(&env, &lp_token);
+        let reward_client = StellarTokenClient::new(&env, &reward_token);
+
+        staking.stake(&staker, &1_000_i128);
+        staking.update_rewards(&admin, &100_i128);
+        assert_eq!(staking.pending_rewards(&staker), 100);
+
+        let reward_balance_before = reward_client.balance(&staker);
+
+        staking.set_emergency_mode(&admin, &true);
+        let returned = staking.emergency_withdraw(&staker);
+
+        // Full LP returned, no reward token moved.
+        assert_eq!(returned, 1_000);
+        assert_eq!(lp_client.balance(&staker), 5_000); // original mint restored
+        assert_eq!(reward_client.balance(&staker), reward_balance_before);
+
+        // Position fully cleared.
+        let info = staking.get_staker_info(&staker);
+        assert_eq!(info.staked_amount, 0);
+        assert_eq!(info.effective_amount, 0);
+        assert_eq!(staking.pending_rewards(&staker), 0);
+        assert_eq!(staking.get_pool_info().total_effective_staked, 0);
+    }
+
+    #[test]
+    fn test_emergency_withdraw_ignores_active_lock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, staker, staking) = setup(&env);
+
+        // Lock for the max duration — unstake would panic before expiry.
+        staking.stake_locked(&staker, &1_000_i128, &MAX_LOCK_DURATION);
+        assert!(staking.try_unstake(&staker, &1_000_i128).is_err());
+
+        staking.set_emergency_mode(&admin, &true);
+        let returned = staking.emergency_withdraw(&staker);
+        assert_eq!(returned, 1_000);
+    }
+
+    #[test]
+    fn test_set_emergency_mode_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, staker, staking) = setup(&env);
+
+        // A non-admin caller must not be able to toggle emergency mode.
+        let result = staking.try_set_emergency_mode(&staker, &true);
+        assert!(result.is_err());
     }
 }

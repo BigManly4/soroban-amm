@@ -6,6 +6,7 @@ It contains examples for the following contracts:
 - **AMM Pool Contract** (`client.py`)
 - **Factory Contract** (`factory_client.py`)
 - **Governance Contract** (`governance_client.py`)
+- **TWAP Consumer Contract** (`twap_client.py`)
 
 ## Install
 
@@ -87,4 +88,40 @@ export VOTE_CHOICE=For # Optional: For, Against, or Abstain (defaults to For)
 
 ```sh
 python governance_client.py
+```
+
+---
+
+## 4. TWAP Consumer Client (`twap_client.py`)
+
+Demonstrates reading a manipulation-resistant time-weighted average price from
+the TWAP consumer contract: it saves a price snapshot for a pool, reads the
+TWAP (single direction and both directions) over a window, optionally validates
+a real-time spot price against the TWAP, and lists the pools the consumer is
+tracking.
+
+A TWAP over `window_seconds` needs a snapshot taken roughly `window_seconds`
+ago, so in production `save_snapshot` is invoked on a schedule (e.g. a keeper
+every minute). When run once, the read step will report that it needs an
+earlier snapshot; run the script again after `window_seconds` has elapsed, or
+set `SAVE_SNAPSHOT=false` to read against snapshots saved previously.
+
+### Configure
+
+Set the environment variables before running the script:
+
+```sh
+export TWAP_CONTRACT_ID=<deployed TWAP consumer contract id>
+export POOL_CONTRACT_ID=<AMM pool contract id to read prices from>
+export SOURCE_SECRET=<secret key for the transaction source / snapshot keeper>
+export WINDOW_SECONDS=60 # Optional, TWAP window in seconds (defaults to 60)
+export SAVE_SNAPSHOT=true # Optional, set to false to skip saving a snapshot
+export SPOT_PRICE=<price, 1_000_000 scale> # Optional, enables spot-vs-TWAP validation
+export MAX_DEVIATION_BPS=500 # Optional, allowed spot/TWAP deviation (defaults to 500)
+```
+
+### Run
+
+```sh
+python twap_client.py
 ```

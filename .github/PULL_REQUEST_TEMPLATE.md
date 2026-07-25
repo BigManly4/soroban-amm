@@ -29,6 +29,7 @@
 - [ ] `cargo clippy -- -D warnings` passes with no new warnings
 - [ ] `cargo test` passes (build WASM first for factory tests: `cargo build --release --target wasm32-unknown-unknown`)
 - [ ] New behaviour is covered by tests
+- [ ] If I changed a hot-path contract (`amm`, `concentrated_liquidity`, `batch_auction`), I ran `cargo run -p benches -- --write-baseline` and committed the updated `benches/baseline.json`
 - [ ] Public interface changes are reflected in the README
 - [ ] `CHANGELOG.md` has been updated with any notable changes
 - [ ] Commit messages follow the [Conventional Commits](https://www.conventionalcommits.org/) format

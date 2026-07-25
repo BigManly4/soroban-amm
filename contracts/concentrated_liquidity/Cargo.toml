@@ -18,3 +18,4 @@ soroban-amm-sdk = { path = "../amm-sdk" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 token = { path = "../token", features = ["testutils"] }
 amm   = { path = "../amm",   features = ["testutils"] }
+cl_position_nft = { path = "../cl_position_nft" }

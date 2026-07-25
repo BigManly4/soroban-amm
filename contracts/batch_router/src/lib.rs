@@ -45,6 +45,25 @@ pub enum BatchOp {
     RemoveLiquidity(RemoveLiquidityOp),
 }
 
+/// Result of a single [`BatchOp`], preserving the real output of each leg so
+/// callers chaining batch results can do downstream accounting.
+///
+/// `RemoveLiquidity` carries both token amounts: packing them into one `i128`
+/// would be lossy, and returning the shares burned (which the caller already
+/// knows) tells them nothing about the tokens actually received.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BatchOpResult {
+    /// Output amount received from the swap.
+    Swap(i128),
+    /// LP shares minted by adding liquidity.
+    AddLiquidity(i128),
+    /// Token amounts `(amount_a, amount_b)` returned by removing liquidity.
+    RemoveLiquidity(i128, i128),
+}
+
+const MAX_BATCH_OPS: u32 = 200;
+
 #[contract]
 pub struct BatchRouter;
 
@@ -59,9 +78,10 @@ impl BatchRouter {
         caller: Address,
         ops: Vec<BatchOp>,
         deadline: u64,
-    ) -> Vec<i128> {
+    ) -> Vec<BatchOpResult> {
         caller.require_auth();
         assert!(!ops.is_empty(), "empty batch");
+        assert!(ops.len() <= MAX_BATCH_OPS, "batch exceeds MAX_BATCH_OPS ceiling");
         assert!(env.ledger().timestamp() <= deadline, "deadline expired");
 
         let mut results = Vec::new(&env);
@@ -86,25 +106,27 @@ impl BatchRouter {
         (ops_len, 1)
     }
 
-    fn execute_op(env: &Env, caller: &Address, op: &BatchOp, deadline: u64) -> i128 {
+    fn execute_op(env: &Env, caller: &Address, op: &BatchOp, deadline: u64) -> BatchOpResult {
         match op {
             BatchOp::Swap(op) => {
-                AmmPoolClient::new(env, &op.pool).swap(
+                let amount_out = AmmPoolClient::new(env, &op.pool).swap(
                     caller,
                     &op.token_in,
                     &op.amount_in,
                     &op.min_out,
                     &deadline,
-                )
+                );
+                BatchOpResult::Swap(amount_out)
             }
             BatchOp::AddLiquidity(op) => {
-                AmmPoolClient::new(env, &op.pool).add_liquidity(
+                let shares = AmmPoolClient::new(env, &op.pool).add_liquidity(
                     caller,
                     &op.amount_a,
                     &op.amount_b,
                     &op.min_shares,
                     &deadline,
-                )
+                );
+                BatchOpResult::AddLiquidity(shares)
             }
             BatchOp::RemoveLiquidity(op) => {
                 let (a, b) = AmmPoolClient::new(env, &op.pool).remove_liquidity(
@@ -114,9 +136,7 @@ impl BatchRouter {
                     &op.min_b,
                     &deadline,
                 );
-                // Pack both legs into one i128 result is lossy; return shares burned as marker.
-                let _ = (a, b);
-                op.shares
+                BatchOpResult::RemoveLiquidity(a, b)
             }
         }
     }
@@ -214,7 +234,10 @@ mod tests {
             .execute_batch(&trader, &ops, &deadline);
 
         assert_eq!(results.len(), 3);
-        assert!(results.get(0).unwrap() > 0);
+        match results.get(0).unwrap() {
+            BatchOpResult::Swap(out) => assert!(out > 0),
+            other => panic!("expected swap result, got {other:?}"),
+        }
     }
 
     #[test]
@@ -258,9 +281,59 @@ mod tests {
             BatchRouterClient::new(&env, &batch_addr).execute_batch(&trader, &ops, &deadline);
 
         assert_eq!(results.len(), 2);
-        assert!(results.get(0).unwrap() > 0);
-        assert!(results.get(1).unwrap() > 0);
+        match results.get(0).unwrap() {
+            BatchOpResult::Swap(out) => assert!(out > 0),
+            other => panic!("expected swap result, got {other:?}"),
+        }
+        match results.get(1).unwrap() {
+            BatchOpResult::AddLiquidity(shares) => assert!(shares > 0),
+            other => panic!("expected add-liquidity result, got {other:?}"),
+        }
         let _ = swap_out;
+    }
+
+    #[test]
+    fn test_batch_remove_liquidity_returns_token_amounts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (ta, tb, pool, _) = setup_pool(&env);
+
+        // The LP adds liquidity directly so the batch can later remove it.
+        let lp = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&lp, &500_000_i128);
+        StellarAssetClient::new(&env, &tb).mint(&lp, &500_000_i128);
+        let shares = AmmPoolClient::new(&env, &pool).add_liquidity(
+            &lp,
+            &400_000_i128,
+            &400_000_i128,
+            &0_i128,
+            &u64::MAX,
+        );
+
+        let ops = vec![
+            &env,
+            BatchOp::RemoveLiquidity(RemoveLiquidityOp {
+                pool: pool.clone(),
+                shares,
+                min_a: 0_i128,
+                min_b: 0_i128,
+            }),
+        ];
+
+        let batch_addr = env.register_contract(None, BatchRouter);
+        let deadline = env.ledger().timestamp() + 1000;
+        let results =
+            BatchRouterClient::new(&env, &batch_addr).execute_batch(&lp, &ops, &deadline);
+
+        assert_eq!(results.len(), 1);
+        // The actual token amounts received are reported, not the shares burned.
+        match results.get(0).unwrap() {
+            BatchOpResult::RemoveLiquidity(a, b) => {
+                assert!(a > 0, "expected token_a out, got {a}");
+                assert!(b > 0, "expected token_b out, got {b}");
+            }
+            other => panic!("expected remove-liquidity result, got {other:?}"),
+        }
     }
 
     #[test]
@@ -300,5 +373,29 @@ mod tests {
         let (individual, batch) = BatchRouter::estimate_call_savings(ops_len);
         let savings_bps = (individual - batch) * 10_000 / individual;
         assert!(savings_bps > 1_500, "expected >15% call overhead savings");
+    }
+
+    #[test]
+    #[should_panic(expected = "batch exceeds MAX_BATCH_OPS ceiling")]
+    fn test_batch_exceeds_max_ops() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (ta, _tb, pool, _) = setup_pool(&env);
+
+        let trader = Address::generate(&env);
+
+        let mut ops = vec![&env];
+        for _ in 0..=MAX_BATCH_OPS {
+            ops.push_back(BatchOp::Swap(SwapOp {
+                pool: pool.clone(),
+                token_in: ta.clone(),
+                amount_in: 1_i128,
+                min_out: 0_i128,
+            }));
+        }
+
+        let deadline = env.ledger().timestamp() + 1000;
+        let batch_addr = env.register_contract(None, BatchRouter);
+        BatchRouterClient::new(&env, &batch_addr).execute_batch(&trader, &ops, &deadline);
     }
 }

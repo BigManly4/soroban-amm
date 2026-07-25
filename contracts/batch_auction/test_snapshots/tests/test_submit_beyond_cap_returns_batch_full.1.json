@@ -1594,6 +1594,12 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "alt_pool"
+                              },
+                              "val": "void"
+                            },
+                            {
+                              "key": {
                                 "symbol": "amount_in"
                               },
                               "val": {
@@ -1632,6 +1638,29 @@
                             },
                             {
                               "key": {
+                                "symbol": "pool_type"
+                              },
+                              "val": {
+                                "vec": [
+                                  {
+                                    "symbol": "Amm"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "sqrt_price_limit"
+                              },
+                              "val": {
+                                "u128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "submitted_at"
                               },
                               "val": {
@@ -1661,6 +1690,14 @@
                               "val": {
                                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
                               }
+                            },
+                            {
+                              "key": {
+                                "symbol": "zero_for_one"
+                              },
+                              "val": {
+                                "bool": false
+                              }
                             }
                           ]
                         }
@@ -1678,6 +1715,12 @@
                         },
                         "val": {
                           "map": [
+                            {
+                              "key": {
+                                "symbol": "alt_pool"
+                              },
+                              "val": "void"
+                            },
                             {
                               "key": {
                                 "symbol": "amount_in"
@@ -1718,6 +1761,29 @@
                             },
                             {
                               "key": {
+                                "symbol": "pool_type"
+                              },
+                              "val": {
+                                "vec": [
+                                  {
+                                    "symbol": "Amm"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "sqrt_price_limit"
+                              },
+                              "val": {
+                                "u128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "submitted_at"
                               },
                               "val": {
@@ -1746,6 +1812,14 @@
                               },
                               "val": {
                                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "zero_for_one"
+                              },
+                              "val": {
+                                "bool": false
                               }
                             }
                           ]

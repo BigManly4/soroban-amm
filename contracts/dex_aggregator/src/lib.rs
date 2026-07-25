@@ -263,10 +263,17 @@ impl DexAggregator {
         let mut frontier_hops: Vec<Vec<RouteHop>> = Vec::new(env);
         let mut frontier_depth: Vec<u32> = Vec::new(env);
 
+        // (token, depth) pairs already enqueued. Without this, every frontier
+        // node re-expands to O(N) neighbours regardless of whether they have
+        // already been explored, blowing the frontier up to O(N^max_hops) and
+        // exhausting the per-transaction instruction budget (#363).
+        let mut visited: Vec<(Address, u32)> = Vec::new(env);
+
         frontier_token.push_back(token_in.clone());
         frontier_amount.push_back(amount_in);
         frontier_hops.push_back(Vec::new(env));
         frontier_depth.push_back(0);
+        visited.push_back((token_in.clone(), 0));
 
         let mut idx: u32 = 0;
         while idx < frontier_token.len() {
@@ -307,7 +314,10 @@ impl DexAggregator {
                         best_out = step.amount_out;
                         best_hops = new_hops;
                     }
-                } else if depth + 1 < max_hops {
+                } else if depth + 1 < max_hops
+                    && !Self::is_visited(&visited, &next_token, depth + 1)
+                {
+                    visited.push_back((next_token.clone(), depth + 1));
                     frontier_token.push_back(next_token);
                     frontier_amount.push_back(step.amount_out);
                     frontier_hops.push_back(new_hops);
@@ -495,6 +505,17 @@ impl DexAggregator {
             || (info.token_a == *token_out && info.token_b == *token_in)
     }
 
+    /// Has `(token, depth)` already been enqueued onto the BFS frontier? (#363)
+    fn is_visited(visited: &Vec<(Address, u32)>, token: &Address, depth: u32) -> bool {
+        for i in 0..visited.len() {
+            let (t, d) = visited.get(i).unwrap();
+            if d == depth && t == *token {
+                return true;
+            }
+        }
+        false
+    }
+
     fn push_unique(vec: &mut Vec<Address>, addr: Address) {
         for i in 0..vec.len() {
             if vec.get(i).unwrap() == addr {
@@ -520,6 +541,23 @@ mod tests {
         let b = Address::generate(&env);
         let result = agg.try_find_best_route(&a, &b, &100_i128, &3u32);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_visited_dedup_is_keyed_on_token_and_depth() {
+        let env = Env::default();
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+
+        let mut visited: Vec<(Address, u32)> = Vec::new(&env);
+        visited.push_back((token_a.clone(), 1));
+
+        // Same (token, depth) pair is treated as already explored.
+        assert!(DexAggregator::is_visited(&visited, &token_a, 1));
+        // Same token at a different depth must still be explorable.
+        assert!(!DexAggregator::is_visited(&visited, &token_a, 2));
+        // A different token at the same depth is independent.
+        assert!(!DexAggregator::is_visited(&visited, &token_b, 1));
     }
 
     #[test]
