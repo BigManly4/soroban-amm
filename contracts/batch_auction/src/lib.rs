@@ -244,10 +244,18 @@ impl BatchAuction {
         // If a mismatched pair slipped through, settle_batch would call swap
         // with the wrong tokens and panic; since settlement is atomic, that
         // panic reverts the whole batch and locks every other trader's escrow
-        // until each order is cancelled individually (issue #361).
-        let info = AmmPoolClient::new(&env, &pool).get_info();
-        let valid_pair = (token_in == info.token_a && token_out == info.token_b)
-            || (token_in == info.token_b && token_out == info.token_a);
+        // until each order is cancelled individually (issue #361). AMM and CL
+        // pools expose their token pair through different interfaces, so the
+        // lookup must branch on pool_type (issue #470).
+        let (pool_token_a, pool_token_b) = match pool_type {
+            PoolType::Amm => {
+                let info = AmmPoolClient::new(&env, &pool).get_info();
+                (info.token_a, info.token_b)
+            }
+            PoolType::Cl => ConcentratedLiquidityClient::new(&env, &pool).get_tokens(),
+        };
+        let valid_pair = (token_in == pool_token_a && token_out == pool_token_b)
+            || (token_in == pool_token_b && token_out == pool_token_a);
         if !valid_pair {
             return Err(AuctionError::InvalidPoolTokenPair);
         }

@@ -1651,6 +1651,16 @@ impl ConcentratedLiquidity {
         }
     }
 
+    /// Returns the pool's `(token_a, token_b)` pair (issue #470).
+    ///
+    /// Unlike the AMM pool, a CL pool has no `get_info`; batch_auction and other
+    /// venue-agnostic callers use this to validate an order's token pair.
+    pub fn get_tokens(env: Env) -> (Address, Address) {
+        let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
+        let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
+        (token_a, token_b)
+    }
+
     // ── Issue #203: per-tick view functions ───────────────────────────────────
 
     /// Returns the `TickInfo` for an initialized tick.
