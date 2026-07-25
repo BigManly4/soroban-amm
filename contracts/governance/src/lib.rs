@@ -735,12 +735,26 @@ impl Governance {
             return Err(GovernanceError::NoVotingPower);
         }
 
+        let record = match choice {
+            Vote::For => VoteRecord::VotedFor,
+            Vote::Against => VoteRecord::VotedAgainst,
+            Vote::Abstain => VoteRecord::VotedAbstain,
+        };
+
         for i in 0..lock_accounts.len() {
             let (account, amount) = lock_accounts.get(i).unwrap();
             lp_client.lock(&account, &amount);
             let lock_key = DataKey::LockedVote(proposal_id, account.clone());
             env.storage().persistent().set(&lock_key, &amount);
             Self::bump_key_ttl(&env, &lock_key);
+
+            // Mark every aggregated holder (delegators included) as having
+            // voted on this proposal so they cannot be locked a second time
+            // via a later vote() call, and so they cannot vote directly or
+            // be re-aggregated after undelegating mid-proposal.
+            let holder_voted_key = DataKey::HasVoted(proposal_id, account.clone());
+            env.storage().persistent().set(&holder_voted_key, &record);
+            Self::bump_key_ttl(&env, &holder_voted_key);
         }
 
         match choice {
@@ -757,14 +771,6 @@ impl Governance {
 
         env.storage().persistent().set(&proposal_key, &proposal);
         Self::bump_key_ttl(&env, &proposal_key);
-
-        let record = match choice {
-            Vote::For => VoteRecord::VotedFor,
-            Vote::Against => VoteRecord::VotedAgainst,
-            Vote::Abstain => VoteRecord::VotedAbstain,
-        };
-        env.storage().persistent().set(&voted_key, &record);
-        Self::bump_key_ttl(&env, &voted_key);
 
         soroban_amm_sdk::emit_versioned_event!(
             env,
@@ -1328,10 +1334,13 @@ impl Governance {
         if depth > MAX_DELEGATION_DEPTH {
             return Err(GovernanceError::DelegationCycle);
         }
-        let power = Self::snapshot_voting_power(lp_client, holder, proposal)?;
-        if power > 0 {
-            *total += power;
-            locks.push_back((holder.clone(), power));
+        let voted_key = DataKey::HasVoted(proposal.id, holder.clone());
+        if !env.storage().persistent().has(&voted_key) {
+            let power = Self::snapshot_voting_power(lp_client, holder, proposal)?;
+            if power > 0 {
+                *total += power;
+                locks.push_back((holder.clone(), power));
+            }
         }
         let count_key = DataKey::DelegatorCount(holder.clone());
         let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -2182,6 +2191,37 @@ mod tests {
 
         let p = gov.get_proposal(&pid);
         assert_eq!(p.votes_for, 600);
+    }
+
+    #[test]
+    fn test_delegate_after_direct_vote_does_not_double_lock_or_double_count() {
+        let s = setup_suite(30);
+        let gov = GovernanceClient::new(&s.env, &s.gov_addr);
+
+        let a = Address::generate(&s.env);
+        let b = Address::generate(&s.env);
+        let proposer = Address::generate(&s.env);
+        mint_lp(&s, &a, 300);
+        mint_lp(&s, &b, 300);
+        mint_lp(&s, &proposer, 400);
+
+        let pid = gov.propose(&proposer, &ProposalKind::UpdateFee(50));
+
+        // B votes directly first, locking their own snapshot power.
+        gov.vote(&b, &pid, &Vote::For);
+        assert_eq!(gov.get_proposal(&pid).votes_for, 300);
+
+        // B then delegates to A while the proposal is still open. Nothing
+        // should block this, but A's later vote must not re-lock or
+        // re-count B's already-locked power.
+        gov.delegate(&b, &a);
+
+        // A votes; this must not panic (double lock of B's balance) and
+        // must only add A's own power, since B already voted.
+        gov.vote(&a, &pid, &Vote::For);
+
+        let p = gov.get_proposal(&pid);
+        assert_eq!(p.votes_for, 300 + 300, "B's power must not be counted twice");
     }
 
     #[test]
