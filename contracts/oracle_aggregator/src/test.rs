@@ -189,6 +189,27 @@ fn get_price_returns_two_way_median_average() {
 }
 
 #[test]
+fn get_price_two_way_median_does_not_overflow_on_large_prices() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    // Two individually-valid prices whose sum exceeds i128::MAX. The old
+    // `(lo + hi) / 2` midpoint would overflow here (panic in debug, wrap in
+    // release); `lo + (hi - lo) / 2` stays in range.
+    let hi = i128::MAX;
+    let lo = i128::MAX - 2;
+    let s1 = deploy_source(&env, hi);
+    let s2 = deploy_source(&env, lo);
+    h.aggregator
+        .register_source(&h.admin, &s1, &OracleSourceType::AmmTwap);
+    h.aggregator
+        .register_source(&h.admin, &s2, &OracleSourceType::External);
+    set_now(&env, 1_000);
+    let result = h.aggregator.get_price(&h.token_a, &h.token_b);
+    assert_eq!(result.price, i128::MAX - 1);
+    assert_eq!(result.confidence, 2);
+}
+
+#[test]
 fn stale_source_excluded_after_window() {
     let env = Env::default();
     // Use max_staleness=600 so the 200s advance doesn't expire s1 or s3.

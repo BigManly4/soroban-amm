@@ -345,7 +345,12 @@ fn median_i128(env: &Env, values: &Vec<i128>) -> i128 {
     if sorted.len() % 2 == 0 {
         let lo = sorted.get_unchecked(mid - 1);
         let hi = sorted.get_unchecked(mid);
-        (lo + hi) / 2
+        // Midpoint via `lo + (hi - lo) / 2` rather than `(lo + hi) / 2`.
+        // The sum of two individually-valid prices can exceed i128::MAX and
+        // overflow (panic in debug, wraparound in release). Since `sorted` is
+        // ascending, `hi >= lo`, and aggregated prices are strictly positive,
+        // so `hi - lo` stays within range and the midpoint never overflows.
+        lo + (hi - lo) / 2
     } else {
         sorted.get_unchecked(mid)
     }
