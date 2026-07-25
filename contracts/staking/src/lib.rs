@@ -395,8 +395,16 @@ impl Staking {
         env.storage().persistent().set(&key_amount, &new_staked);
         env.storage().persistent().extend_ttl(&key_amount, MIN_TTL, BUMP_TO);
 
-        // Recompute effective amount for the whole position with the new boost.
-        let old_effective = Self::_effective_amount(current_staked, new_boost);
+        // Remove the position's existing contribution using the boost it was
+        // actually recorded with, not the freshly recomputed one — otherwise
+        // TotalEffectiveStaked (Σ raw_amount × stored_boost) is corrupted
+        // whenever the boost changes on a top-up (issue #467).
+        let old_boost: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BoostMultiplier(staker.clone()))
+            .unwrap_or(MIN_BOOST);
+        let old_effective = Self::_effective_amount(current_staked, old_boost);
         let new_effective = Self::_effective_amount(new_staked, new_boost);
 
         // Adjust total effective staked.
@@ -954,6 +962,41 @@ mod tests {
 
         let pool = staking.get_pool_info();
         assert_eq!(pool.total_effective_staked, 2_500);
+    }
+
+    // ── Issue #467: stake_locked must remove the old effective stake using the
+    // boost the position was actually recorded with, not the freshly
+    // recomputed one, or TotalEffectiveStaked drifts on every top-up ────────────
+
+    #[test]
+    fn test_stake_locked_top_up_after_boost_decay_keeps_total_effective_staked_correct() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        let (_, staker, staking) = setup(&env);
+
+        // Lock for the max duration up front — boost starts at the maximum (2.5x).
+        staking.stake_locked(&staker, &1_000_i128, &MAX_LOCK_DURATION);
+        let info_before = staking.get_staker_info(&staker);
+        assert_eq!(info_before.boost_multiplier, DEFAULT_MAX_BOOST);
+
+        // Let half the lock elapse — the boost for the now-shorter remaining
+        // time is lower than the boost the position was recorded with.
+        env.ledger()
+            .set_timestamp(1_000 + MAX_LOCK_DURATION / 2);
+
+        // Top up without requesting a new lock (lock_duration_secs = 0): this
+        // recomputes the boost from the shrunken remaining lock time.
+        staking.stake_locked(&staker, &500_i128, &0);
+
+        let info_after = staking.get_staker_info(&staker);
+        assert!(info_after.boost_multiplier < DEFAULT_MAX_BOOST);
+
+        // With a single staker, TotalEffectiveStaked must equal this staker's
+        // own effective amount — the old, differently-boosted contribution
+        // must be fully replaced, not partially subtracted.
+        let pool = staking.get_pool_info();
+        assert_eq!(pool.total_effective_staked, info_after.effective_amount);
     }
 
     #[test]

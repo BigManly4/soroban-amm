@@ -251,7 +251,7 @@ impl Factory {
 
         if env
             .storage()
-            .instance()
+            .persistent()
             .has(&DataKey::Pool(ta.clone(), tb.clone()))
         {
             return Err(FactoryError::PoolAlreadyExists);
@@ -331,17 +331,21 @@ impl Factory {
         );
 
         // Register pool in lookup indexes and record the LP token address.
+        // These are per-pool entries and grow without bound as pools accumulate,
+        // so they belong in persistent storage (each with its own TTL) rather
+        // than instance storage, which is a single blob loaded on every call
+        // to the contract (issue #468).
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Pool(ta.clone(), tb.clone()), &pool_addr);
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::LpToken(pool_addr.clone()), &lp_addr);
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::GovernanceFor(pool_addr.clone()), &gov_addr);
         // Store reverse token-pair lookup used by sweep_fees to forward tokens.
-        env.storage().instance().set(
+        env.storage().persistent().set(
             &DataKey::PoolTokens(pool_addr.clone()),
             &(ta.clone(), tb.clone()),
         );
@@ -515,7 +519,7 @@ impl Factory {
         };
 
         let cl_key = DataKey::ClPool(ta.clone(), tb.clone(), fee_bps);
-        if env.storage().instance().has(&cl_key) {
+        if env.storage().persistent().has(&cl_key) {
             return Err(FactoryError::ClPoolAlreadyExists);
         }
 
@@ -555,7 +559,7 @@ impl Factory {
             &tick_spacing,
         );
 
-        env.storage().instance().set(&cl_key, &pool_addr);
+        env.storage().persistent().set(&cl_key, &pool_addr);
 
         env.storage()
             .persistent()
@@ -661,13 +665,13 @@ impl Factory {
 
     /// Return the LP token address for the given pool, or `None` if unknown.
     pub fn get_lp_token(env: Env, pool: Address) -> Option<Address> {
-        env.storage().instance().get(&DataKey::LpToken(pool))
+        env.storage().persistent().get(&DataKey::LpToken(pool))
     }
 
     /// Return the governance address for the given pool, or `None` if unknown.
     pub fn get_governance(env: Env, pool: Address) -> Option<Address> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::GovernanceFor(pool))
             .unwrap_or(None)
     }
@@ -702,7 +706,7 @@ impl Factory {
         } else {
             (token_b, token_a)
         };
-        env.storage().instance().get(&DataKey::Pool(ta, tb))
+        env.storage().persistent().get(&DataKey::Pool(ta, tb))
     }
 
     /// Return the CL pool address for `(token_a, token_b, fee_bps)`, or `None` if absent.
@@ -719,7 +723,7 @@ impl Factory {
             (token_b, token_a)
         };
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::ClPool(ta, tb, fee_bps))
     }
 
@@ -824,7 +828,7 @@ impl Factory {
 
     /// Return the token pair `(token_a, token_b)` recorded for `pool`, or `None`.
     pub fn get_pool_tokens(env: Env, pool: Address) -> Option<(Address, Address)> {
-        env.storage().instance().get(&DataKey::PoolTokens(pool))
+        env.storage().persistent().get(&DataKey::PoolTokens(pool))
     }
 
     /// Set and propagate the global protocol fee configuration to all
@@ -963,7 +967,7 @@ impl Factory {
                 // Skip governance-controlled pools.
                 let gov: Option<Option<Address>> = env
                     .storage()
-                    .instance()
+                    .persistent()
                     .get(&DataKey::GovernanceFor(pool_addr.clone()));
                 let is_governed = gov.flatten().is_some();
                 if is_governed {
@@ -972,7 +976,7 @@ impl Factory {
 
                 let Some((token_a, token_b)) = env
                     .storage()
-                    .instance()
+                    .persistent()
                     .get::<DataKey, (Address, Address)>(&DataKey::PoolTokens(pool_addr.clone()))
                 else {
                     continue;
@@ -1084,7 +1088,7 @@ impl Factory {
                 // so the factory cannot authorize their pool-level fee update.
                 let gov: Option<Option<Address>> = env
                     .storage()
-                    .instance()
+                    .persistent()
                     .get(&DataKey::GovernanceFor(pool_addr.clone()));
                 if gov.flatten().is_some() {
                     continue;

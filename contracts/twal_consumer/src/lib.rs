@@ -31,6 +31,11 @@ pub enum DataKey {
     Keeper,
     LiquiditySnapshot(Address, u64),
     TrackedPoolsPersistent,
+    /// Sorted (ascending, deduplicated) ledger timestamps at which a
+    /// liquidity snapshot was saved for this pool. Lets `get_twal_*`
+    /// binary-search for the most recent snapshot at or before an arbitrary
+    /// `then_ts` instead of requiring an exact-timestamp hit (issue #469).
+    SnapshotTimestamps(Address),
 }
 
 #[contracttype]
@@ -80,7 +85,73 @@ impl TwalConsumer {
             Self::SNAPSHOT_TTL_LEDGERS,
         );
         Self::register_tracked_pool(&env, &pool);
+        Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
         Ok(())
+    }
+
+    /// Record `ts` in the pool's sorted snapshot-timestamp index. Ledger
+    /// timestamps are non-decreasing across calls, so appending keeps the
+    /// index sorted; skip if `ts` is already the most recent entry so a
+    /// keeper re-saving within the same ledger doesn't create a duplicate.
+    fn record_snapshot_timestamp(env: &Env, pool: &Address, ts: u64) {
+        let key = DataKey::SnapshotTimestamps(pool.clone());
+        let mut timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if timestamps.last().map_or(true, |last| last != ts) {
+            timestamps.push_back(ts);
+        }
+        env.storage().persistent().set(&key, &timestamps);
+        env.storage().persistent().extend_ttl(
+            &key,
+            Self::SNAPSHOT_TTL_LEDGERS / 2,
+            Self::SNAPSHOT_TTL_LEDGERS,
+        );
+    }
+
+    fn remove_snapshot_timestamp(env: &Env, pool: &Address, ts: u64) {
+        let key = DataKey::SnapshotTimestamps(pool.clone());
+        let timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut updated: Vec<u64> = Vec::new(env);
+        for i in 0..timestamps.len() {
+            let t = timestamps.get(i).unwrap();
+            if t != ts {
+                updated.push_back(t);
+            }
+        }
+        env.storage().persistent().set(&key, &updated);
+    }
+
+    /// Binary-search the pool's snapshot-timestamp index for the most recent
+    /// entry at or before `then_ts` (the "floor"). Returns `None` if no
+    /// snapshot that old exists.
+    fn floor_snapshot_ts(env: &Env, pool: &Address, then_ts: u64) -> Option<u64> {
+        let timestamps: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SnapshotTimestamps(pool.clone()))
+            .unwrap_or_else(|| Vec::new(env));
+        let mut lo: u32 = 0;
+        let mut hi: u32 = timestamps.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if timestamps.get(mid).unwrap() <= then_ts {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo == 0 {
+            None
+        } else {
+            Some(timestamps.get(lo - 1).unwrap())
+        }
     }
 
     fn register_tracked_pool(env: &Env, pool: &Address) {
@@ -120,10 +191,12 @@ impl TwalConsumer {
             return Err(TwalError::InsufficientHistory);
         }
         let then_ts = ledger_ts_now - window_seconds;
+        let floor_ts =
+            Self::floor_snapshot_ts(&env, &pool, then_ts).ok_or(TwalError::InsufficientHistory)?;
         let snapshot: LiquiditySnapshot = env
             .storage()
             .persistent()
-            .get(&DataKey::LiquiditySnapshot(pool, then_ts))
+            .get(&DataKey::LiquiditySnapshot(pool, floor_ts))
             .ok_or(TwalError::NoSnapshotFound)?;
 
         let delta = (cum_now as u128).wrapping_sub(snapshot.cum_liquidity as u128) as i128;
@@ -166,6 +239,7 @@ impl TwalConsumer {
             Self::SNAPSHOT_TTL_LEDGERS,
         );
         Self::register_tracked_pool(&env, &pool);
+        Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
         Ok(())
     }
 
@@ -177,6 +251,7 @@ impl TwalConsumer {
             return Err(TwalError::NoSnapshotFound);
         }
         env.storage().persistent().remove(&key);
+        Self::remove_snapshot_timestamp(&env, &pool, ledger_ts);
         env.events()
             .publish((Symbol::new(&env, "snapshot_deleted"),), (pool, ledger_ts));
         Ok(())
@@ -196,11 +271,13 @@ impl TwalConsumer {
         );
 
         let then_ts = ledger_ts_now - window_seconds;
+        let floor_ts = Self::floor_snapshot_ts(&env, &pool, then_ts)
+            .unwrap_or_else(|| panic!("no liquidity snapshot at or before {then_ts}"));
         let snapshot: LiquiditySnapshot = env
             .storage()
             .persistent()
-            .get(&DataKey::LiquiditySnapshot(pool, then_ts))
-            .unwrap_or_else(|| panic!("missing liquidity snapshot at {then_ts}"));
+            .get(&DataKey::LiquiditySnapshot(pool, floor_ts))
+            .unwrap_or_else(|| panic!("missing liquidity snapshot at {floor_ts}"));
 
         let delta = (active as u128).wrapping_sub(snapshot.cum_liquidity as u128) as i128;
         let elapsed = (pool_ts_now - snapshot.pool_ts) as i128;
@@ -383,15 +460,71 @@ mod tests {
         consumer.initialize(&admin);
         consumer.save_snapshot(&amm_addr);
 
-        // Snapshot stored at ledger timestamp 10_000; deleting it removes it so a
-        // later TWAL query over that window can no longer find it.
+        // Snapshot stored at ledger timestamp 10_000; deleting it removes it
+        // (and its entry in the timestamp index) so a later TWAL query whose
+        // window lands at or before that point has no floor snapshot left.
         consumer.delete_snapshot(&amm_addr, &10_000_u64);
 
         env.ledger().with_mut(|l| l.timestamp = 10_600);
         assert_eq!(
             consumer.try_get_twal_liquidity(&amm_addr, &600),
-            Err(Ok(TwalError::NoSnapshotFound))
+            Err(Ok(TwalError::InsufficientHistory))
         );
+    }
+
+    // ── Issue #469: arbitrary window_seconds should hit the nearest older
+    // snapshot instead of requiring an exact-timestamp match ──────────────────
+
+    #[test]
+    fn test_get_twal_liquidity_with_arbitrary_window_uses_floor_snapshot() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(10_000);
+
+        let admin = Address::generate(&env);
+        let amm_addr = env.register_contract(None, AmmPool);
+        let lp_addr = env.register_contract(None, LpToken);
+        let consumer_addr = env.register_contract(None, TwalConsumer);
+
+        token::LpTokenClient::new(&env, &lp_addr).initialize(
+            &amm_addr,
+            &soroban_sdk::String::from_str(&env, "LP"),
+            &soroban_sdk::String::from_str(&env, "LP"),
+            &7u32,
+        );
+
+        let (ta, ta_sac) = create_sac(&env, &admin);
+        let (tb, tb_sac) = create_sac(&env, &admin);
+        AmmPoolClient::new(&env, &amm_addr).initialize(
+            &admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128,
+        );
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        AmmPoolClient::new(&env, &amm_addr).add_liquidity(
+            &provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX,
+        );
+
+        let consumer = TwalConsumerClient::new(&env, &consumer_addr);
+        consumer.initialize(&admin);
+        consumer.save_snapshot(&amm_addr);
+
+        // A second snapshot 30s later, after more liquidity is added.
+        env.ledger().with_mut(|l| l.timestamp = 10_030);
+        ta_sac.mint(&provider, &100_000_i128);
+        tb_sac.mint(&provider, &100_000_i128);
+        AmmPoolClient::new(&env, &amm_addr).add_liquidity(
+            &provider, &100_000_i128, &100_000_i128, &0_i128, &u64::MAX,
+        );
+        consumer.save_snapshot(&amm_addr);
+
+        // window=50 at ts=10_075 asks for then_ts=10_025, which has no exact
+        // snapshot. Previously this reverted with NoSnapshotFound; now it
+        // must fall back to the floor (the ts=10_000 snapshot).
+        env.ledger().with_mut(|l| l.timestamp = 10_075);
+        let twal = consumer.get_twal_liquidity(&amm_addr, &50);
+        assert!(twal > 0);
     }
 
     #[test]

@@ -1164,10 +1164,11 @@ impl ConcentratedLiquidity {
             deadline,
         )?;
 
-        // Tag the position as a range order.
+        // Tag the position as a range order and record which side it was
+        // placed on, so `check_range_order_filled` knows the fill direction.
         env.storage().instance().set(
             &DataKey::RangeOrder(provider.clone(), lower_tick, upper_tick),
-            &true,
+            &is_above,
         );
 
         soroban_amm_sdk::emit_versioned_event!(
@@ -1203,14 +1204,14 @@ impl ConcentratedLiquidity {
             .get(&DataKey::Position(provider.clone(), lower_tick, upper_tick))
             .ok_or(ClError::PositionNotFound)?;
 
-        let is_range_order: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::RangeOrder(provider, lower_tick, upper_tick))
-            .unwrap_or(false);
-        if !is_range_order {
+        let range_order_key = DataKey::RangeOrder(provider, lower_tick, upper_tick);
+        if !env.storage().instance().has(&range_order_key) {
             return Err(ClError::PositionNotFound);
         }
+        // The original side the order was placed on: `true` for an
+        // above-range order (fills as price rises), `false` for a
+        // below-range order (fills as price falls).
+        let is_above: bool = env.storage().instance().get(&range_order_key).unwrap();
 
         let current_tick: i32 = env
             .storage()
@@ -1218,20 +1219,17 @@ impl ConcentratedLiquidity {
             .get(&DataKey::CurrentTick)
             .unwrap_or(0);
 
-        // Determine fill direction from the range relative to the current tick
-        // at the time of the query.
-        let status = if current_tick >= upper_tick {
-            // Price has risen above the range → above-range order is filled.
-            RangeOrderStatus::Filled
+        // Only report Filled once the price has crossed through the range in
+        // this order's original fill direction; otherwise it is still Pending.
+        let status = if is_above {
+            if current_tick >= upper_tick {
+                RangeOrderStatus::Filled
+            } else {
+                RangeOrderStatus::Pending
+            }
         } else if current_tick < lower_tick {
-            // Price is still below the range → above-range order is pending,
-            // OR price has fallen below the range → below-range order is filled.
-            // We distinguish by checking which side the range was on originally.
-            // Since we only allow fully out-of-range creation, if current_tick
-            // is now below lower_tick the below-range order is filled.
             RangeOrderStatus::Filled
         } else {
-            // Price is inside the range — order is partially filled (pending).
             RangeOrderStatus::Pending
         };
 
@@ -1653,6 +1651,16 @@ impl ConcentratedLiquidity {
         }
     }
 
+    /// Returns the pool's `(token_a, token_b)` pair (issue #470).
+    ///
+    /// Unlike the AMM pool, a CL pool has no `get_info`; batch_auction and other
+    /// venue-agnostic callers use this to validate an order's token pair.
+    pub fn get_tokens(env: Env) -> (Address, Address) {
+        let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
+        let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
+        (token_a, token_b)
+    }
+
     // ── Issue #203: per-tick view functions ───────────────────────────────────
 
     /// Returns the `TickInfo` for an initialized tick.
@@ -1873,14 +1881,20 @@ impl ConcentratedLiquidity {
             let mut target_price_x96 = next_price_x96;
             let mut hit_limit = false;
 
-            if zero_for_one {
-                if next_price_x96 <= sqrt_price_limit_x96 {
+            // `sqrt_price_limit_x96 == 0` is the documented "no limit" sentinel.
+            // Skip the comparison entirely in that case — for `zero_for_one = false`
+            // every price is `>= 0` (u128), which would otherwise force the target
+            // price to 0 on the very first iteration (issue #492).
+            if sqrt_price_limit_x96 != 0 {
+                if zero_for_one {
+                    if next_price_x96 <= sqrt_price_limit_x96 {
+                        target_price_x96 = sqrt_price_limit_x96;
+                        hit_limit = true;
+                    }
+                } else if next_price_x96 >= sqrt_price_limit_x96 {
                     target_price_x96 = sqrt_price_limit_x96;
                     hit_limit = true;
                 }
-            } else if next_price_x96 >= sqrt_price_limit_x96 {
-                target_price_x96 = sqrt_price_limit_x96;
-                hit_limit = true;
             }
 
             let amount_in_after_fee = amount_remaining * (10000 - fee_bps) / 10000;
@@ -2682,14 +2696,20 @@ impl ConcentratedLiquidity {
             let mut target_price_x96 = next_price_x96;
             let mut hit_limit = false;
 
-            if zero_for_one {
-                if next_price_x96 <= sqrt_price_limit_x96 {
+            // `sqrt_price_limit_x96 == 0` is the documented "no limit" sentinel.
+            // Skip the comparison entirely in that case — for `zero_for_one = false`
+            // every price is `>= 0` (u128), which would otherwise force the target
+            // price to 0 on the very first iteration (issue #492).
+            if sqrt_price_limit_x96 != 0 {
+                if zero_for_one {
+                    if next_price_x96 <= sqrt_price_limit_x96 {
+                        target_price_x96 = sqrt_price_limit_x96;
+                        hit_limit = true;
+                    }
+                } else if next_price_x96 >= sqrt_price_limit_x96 {
                     target_price_x96 = sqrt_price_limit_x96;
                     hit_limit = true;
                 }
-            } else if next_price_x96 >= sqrt_price_limit_x96 {
-                target_price_x96 = sqrt_price_limit_x96;
-                hit_limit = true;
             }
 
             let amount_in_after_fee = amount_remaining * (10000 - fee_bps) / 10000;
@@ -3310,6 +3330,40 @@ mod tests {
         assert_eq!(amount_out_emitted, amount_out);
         assert_eq!(new_sqrt_price, state.sqrt_price);
         assert_eq!(new_tick, state.current_tick);
+    }
+
+    /// Issue #492: `sqrt_price_limit_x96 = 0` is the documented "no limit" sentinel.
+    /// For `zero_for_one = false`, `next_price_x96 >= 0` is trivially true for every
+    /// u128 price, so before the fix this forced `hit_limit = true` on the very
+    /// first iteration and collapsed the target price to 0 — bricking the pool by
+    /// persisting `SqrtPriceX96 = 0` even though no tokens were ever transferred.
+    #[test]
+    fn swap_zero_for_one_false_with_zero_price_limit_trades_normally() {
+        let env = Env::default();
+        let te = setup_test_env(&env, 30, 0);
+
+        te.client
+            .mint_position(&te.provider, &-100, &100, &100_000, &100_000, &0, &0);
+
+        let state_before = te.client.get_pool_state();
+
+        // zero_for_one = false, sqrt_price_limit_x96 = 0 ("no limit"), as
+        // dex_aggregator::execute_hops always passes for CL hops.
+        let amount_out = te
+            .client
+            .swap(&te.provider, &false, &1_000, &0, &0, &u64::MAX);
+
+        assert!(amount_out > 0, "swap must produce real output, not a no-op");
+
+        let state_after = te.client.get_pool_state();
+        assert_ne!(
+            state_after.sqrt_price, 0,
+            "pool price must never collapse to 0"
+        );
+        assert!(
+            state_after.sqrt_price > state_before.sqrt_price,
+            "zero_for_one = false must move the price up, not zero it out"
+        );
     }
 
     #[test]
@@ -5907,6 +5961,199 @@ mod test_single_token_deposit {
         assert_eq!(
             f.client.position_token_id(&f.alice, &f.lower, &f.upper),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_range_order_fill_status {
+    // Regression tests for issue #472: a range order must record which side
+    // it was placed on, and only report `Filled` once the price has crossed
+    // through the range in that order's original fill direction.
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::token::StellarAssetClient;
+    use soroban_sdk::Env;
+
+    fn setup_pool(
+        env: &Env,
+        initial_tick: i32,
+    ) -> (Address, Address, Address, ConcentratedLiquidityClient) {
+        env.mock_all_auths();
+        let admin = Address::generate(env);
+        env.budget().reset_unlimited();
+        let token_a = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_b = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let cl_addr = env.register_contract(None, ConcentratedLiquidity);
+        let client = ConcentratedLiquidityClient::new(env, &cl_addr);
+        client.initialize(&admin, &token_a, &token_b, &0_i128, &initial_tick, &1_i32);
+
+        let provider = Address::generate(env);
+        StellarAssetClient::new(env, &token_a).mint(&provider, &100_000_000_i128);
+        StellarAssetClient::new(env, &token_b).mint(&provider, &100_000_000_i128);
+        StellarAssetClient::new(env, &token_a).mint(&cl_addr, &100_000_000_i128);
+        StellarAssetClient::new(env, &token_b).mint(&cl_addr, &100_000_000_i128);
+
+        (provider, token_a, token_b, client)
+    }
+
+    /// Moves the pool's current tick directly via storage, standing in for a
+    /// swap that has crossed price through (or into) the range.
+    fn set_current_tick(env: &Env, cl_addr: &Address, tick: i32) {
+        env.as_contract(cl_addr, || {
+            env.storage().instance().set(&DataKey::CurrentTick, &tick);
+        });
+    }
+
+    // ── Above-range order (deposit token A, fills as price rises) ────────────
+
+    #[test]
+    fn above_range_order_is_pending_at_placement() {
+        let env = Env::default();
+        // current_tick = 0, range = [100, 200] → an above-range order.
+        let (provider, _token_a, _token_b, client) = setup_pool(&env, 0);
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &_token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Pending,
+            "an above-range order must not be reported as Filled before the price has moved"
+        );
+    }
+
+    #[test]
+    fn above_range_order_is_pending_while_price_is_still_below_range() {
+        let env = Env::default();
+        let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
+        let cl_addr = client.address.clone();
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        // Price has moved but has not yet reached the range.
+        set_current_tick(&env, &cl_addr, 50);
+
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Pending
+        );
+    }
+
+    #[test]
+    fn above_range_order_is_filled_once_price_crosses_upper_tick() {
+        let env = Env::default();
+        let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
+        let cl_addr = client.address.clone();
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        set_current_tick(&env, &cl_addr, 200);
+
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Filled
+        );
+    }
+
+    // ── Below-range order (deposit token B, fills as price falls) ────────────
+
+    #[test]
+    fn below_range_order_is_pending_at_placement() {
+        let env = Env::default();
+        // current_tick = 300, range = [100, 200] → a below-range order.
+        let (provider, _token_a, token_b, client) = setup_pool(&env, 300);
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Pending,
+            "a below-range order must not be reported as Filled before the price has moved"
+        );
+    }
+
+    #[test]
+    fn below_range_order_is_pending_while_price_is_still_above_range() {
+        let env = Env::default();
+        let (provider, _token_a, token_b, client) = setup_pool(&env, 300);
+        let cl_addr = client.address.clone();
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        // Price has fallen but has not yet reached the range.
+        set_current_tick(&env, &cl_addr, 250);
+
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Pending
+        );
+    }
+
+    #[test]
+    fn below_range_order_is_filled_once_price_crosses_lower_tick() {
+        let env = Env::default();
+        let (provider, _token_a, token_b, client) = setup_pool(&env, 300);
+        let cl_addr = client.address.clone();
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        set_current_tick(&env, &cl_addr, 99);
+
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Filled
         );
     }
 }
