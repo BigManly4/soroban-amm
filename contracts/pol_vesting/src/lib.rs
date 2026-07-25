@@ -223,7 +223,15 @@ impl PolVestingContract {
         Ok(())
     }
 
-    /// Linear vesting after cliff; 0 before cliff; `total` after end.
+    /// Linear vesting between `cliff_ledger` and `end_ledger`; 0 before the
+    /// cliff; `total` at or after `end_ledger`.
+    ///
+    /// Accrual starts at the cliff, not at `start_ledger`. Measuring elapsed
+    /// time from `start_ledger` (while gating release on the cliff) would make
+    /// the vested amount jump discontinuously to `total * (cliff - start) /
+    /// (end - start)` the instant the cliff is reached — a lump-sum unlock of
+    /// protocol-owned liquidity that contradicts the documented schedule and
+    /// the "cannot be withdrawn in a single step" guarantee.
     fn vested_amount(schedule: &PolVesting, current_ledger: u32) -> i128 {
         if current_ledger < schedule.cliff_ledger {
             return 0;
@@ -231,8 +239,10 @@ impl PolVestingContract {
         if current_ledger >= schedule.end_ledger {
             return schedule.total;
         }
-        let elapsed = (current_ledger - schedule.start_ledger) as i128;
-        let duration = (schedule.end_ledger - schedule.start_ledger) as i128;
+        // `create_vesting` enforces `end_ledger > cliff_ledger`, so `duration`
+        // is always positive.
+        let elapsed = (current_ledger - schedule.cliff_ledger) as i128;
+        let duration = (schedule.end_ledger - schedule.cliff_ledger) as i128;
         schedule.total * elapsed / duration
     }
 }
@@ -322,6 +332,31 @@ mod tests {
 
         let schedule = client.get_vesting(&s.beneficiary);
         assert_eq!(schedule.released, 500_000);
+    }
+
+    #[test]
+    fn test_linear_vesting_from_cliff_not_start() {
+        let s = setup();
+        // start=100, cliff=200, end=400: a 100-ledger gap between start and
+        // cliff. Vesting must accrue linearly over [cliff, end], not [start, end].
+        create_schedule(&s, 100, 200, 400);
+        let client = PolVestingContractClient::new(&s.env, &s.contract_id);
+
+        // At the cliff exactly: nothing has accrued yet — no lump-sum unlock.
+        s.env.ledger().set_sequence_number(200);
+        let err = client.try_release(&s.beneficiary).unwrap_err().unwrap();
+        assert_eq!(err, VestingError::NothingToRelease);
+
+        // Halfway between cliff (200) and end (400): 50% vested.
+        s.env.ledger().set_sequence_number(300);
+        let released = client.release(&s.beneficiary);
+        assert_eq!(released, 500_000);
+
+        // At end: the remainder becomes releasable, totalling `total`.
+        s.env.ledger().set_sequence_number(400);
+        let released = client.release(&s.beneficiary);
+        assert_eq!(released, 500_000);
+        assert_eq!(client.get_vesting(&s.beneficiary).released, 1_000_000);
     }
 
     #[test]
