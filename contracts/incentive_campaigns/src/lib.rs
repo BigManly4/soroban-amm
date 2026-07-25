@@ -38,7 +38,8 @@ pub struct Campaign {
     pub reward_token: Address,
     pub start_time: u64,
     pub end_time: u64,
-    /// Rewards per second, scaled by REWARD_SCALE
+    /// Rewards per second, in raw base units of `reward_token` (no fixed-point
+    /// scaling — a rate smaller than 1 base unit/sec rounds down to 0 rewards).
     pub reward_rate: i128,
     pub active: bool,
     pub total_distributed: i128,
@@ -60,8 +61,6 @@ pub struct IncentiveCampaigns;
 
 #[contractimpl]
 impl IncentiveCampaigns {
-    pub const REWARD_SCALE: i128 = 1_000_000_000_000_000_000; // 1e18
-
     pub fn initialize(env: Env, governance: Address) {
         assert!(
             !env.storage().instance().has(&DataKey::Governance),
