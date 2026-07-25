@@ -168,6 +168,8 @@ fn get_price_returns_median_of_three_sources() {
         .register_source(&h.admin, &s2, &OracleSourceType::ClTwap);
     h.aggregator
         .register_source(&h.admin, &s3, &OracleSourceType::External);
+    // These prices span 50%; widen the band so this stays a pure median test.
+    h.aggregator.set_max_deviation_bps(&h.admin, &5_000);
     set_now(&env, 1_000);
 
     let result = h.aggregator.get_price(&h.token_a, &h.token_b);
@@ -185,6 +187,8 @@ fn get_price_returns_two_way_median_average() {
         .register_source(&h.admin, &s1, &OracleSourceType::AmmTwap);
     h.aggregator
         .register_source(&h.admin, &s2, &OracleSourceType::External);
+    // 100 vs 200 straddle the median by 33%; widen the band so both count.
+    h.aggregator.set_max_deviation_bps(&h.admin, &5_000);
     set_now(&env, 1_000);
     let result = h.aggregator.get_price(&h.token_a, &h.token_b);
     assert_eq!(result.price, 150);
@@ -205,6 +209,8 @@ fn stale_source_excluded_after_window() {
         .register_source(&h.admin, &s2, &OracleSourceType::ClTwap);
     h.aggregator
         .register_source(&h.admin, &s3, &OracleSourceType::External);
+    // Prices span 50%; widen the band so this stays a pure staleness test.
+    h.aggregator.set_max_deviation_bps(&h.admin, &5_000);
 
     set_now(&env, 1_000);
     h.aggregator.get_price(&h.token_a, &h.token_b);
@@ -310,4 +316,169 @@ fn stale_src_event_emitted_when_sources_skipped() {
     assert_eq!(stale_addrs.len(), 2);
     assert!(stale_addrs.contains(&s2));
     assert!(stale_addrs.contains(&s3));
+}
+
+// ── Deviation band (#466) ────────────────────────────────────────────────────
+
+#[test]
+fn get_max_deviation_bps_defaults_to_constant() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    assert_eq!(h.aggregator.get_max_deviation_bps(), DEFAULT_MAX_DEVIATION_BPS);
+}
+
+#[test]
+fn set_max_deviation_bps_updates_band() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    h.aggregator.set_max_deviation_bps(&h.admin, &250);
+    assert_eq!(h.aggregator.get_max_deviation_bps(), 250);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn set_max_deviation_bps_rejects_zero() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    h.aggregator.set_max_deviation_bps(&h.admin, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn set_max_deviation_bps_rejects_above_max() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    h.aggregator.set_max_deviation_bps(&h.admin, &10_001);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn set_max_deviation_bps_rejects_non_admin() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    let attacker = Address::generate(&env);
+    h.aggregator.set_max_deviation_bps(&attacker, &250);
+}
+
+/// A source deviating far outside the band is dropped: it does not count
+/// toward confidence and does not move the reported median.
+#[test]
+fn deviating_source_excluded_from_confidence_and_price() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    let s1 = deploy_source(&env, 100);
+    let s2 = deploy_source(&env, 102);
+    let s3 = deploy_source(&env, 300); // ~194% above the median → out of band
+    h.aggregator
+        .register_source(&h.admin, &s1, &OracleSourceType::AmmTwap);
+    h.aggregator
+        .register_source(&h.admin, &s2, &OracleSourceType::ClTwap);
+    h.aggregator
+        .register_source(&h.admin, &s3, &OracleSourceType::External);
+    set_now(&env, 1_000);
+
+    let result = h.aggregator.get_price(&h.token_a, &h.token_b);
+    // Only s1 and s2 agree: median(100, 102) = 101, confidence 2 (not 3).
+    assert_eq!(result.price, 101);
+    assert_eq!(result.confidence, 2);
+}
+
+/// The two-source manipulation from the issue: with exactly MIN_VALID_SOURCES
+/// sources that disagree, neither sits within the band of their (mean) median,
+/// so no confident price is produced.
+#[test]
+fn two_disagreeing_sources_report_no_confidence() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    let honest = deploy_source(&env, 100);
+    let attacker = deploy_source(&env, 200);
+    h.aggregator
+        .register_source(&h.admin, &honest, &OracleSourceType::AmmTwap);
+    h.aggregator
+        .register_source(&h.admin, &attacker, &OracleSourceType::External);
+    set_now(&env, 1_000);
+
+    // Neither source is within 5% of the median (150) → zero confidence.
+    let safe = h.aggregator.get_price_safe(&h.token_a, &h.token_b);
+    assert_eq!(safe.confidence, 0);
+    assert_eq!(safe.price, 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn two_disagreeing_sources_panic_on_get_price() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    let honest = deploy_source(&env, 100);
+    let attacker = deploy_source(&env, 200);
+    h.aggregator
+        .register_source(&h.admin, &honest, &OracleSourceType::AmmTwap);
+    h.aggregator
+        .register_source(&h.admin, &attacker, &OracleSourceType::External);
+    set_now(&env, 1_000);
+    h.aggregator.get_price(&h.token_a, &h.token_b);
+}
+
+/// Widening the band lets a previously-deviant source count again, confirming
+/// the band is genuinely configurable.
+#[test]
+fn widening_band_admits_previously_deviant_source() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    let s1 = deploy_source(&env, 100);
+    let s2 = deploy_source(&env, 102);
+    let s3 = deploy_source(&env, 150); // ~47% above the median → out of the 5% band
+    h.aggregator
+        .register_source(&h.admin, &s1, &OracleSourceType::AmmTwap);
+    h.aggregator
+        .register_source(&h.admin, &s2, &OracleSourceType::ClTwap);
+    h.aggregator
+        .register_source(&h.admin, &s3, &OracleSourceType::External);
+
+    // Under the default band, s3 is dropped: median(100, 102) = 101, conf 2.
+    set_now(&env, 1_000);
+    let tight = h.aggregator.get_price(&h.token_a, &h.token_b);
+    assert_eq!(tight.price, 101);
+    assert_eq!(tight.confidence, 2);
+
+    // Widen the band to 50%; s3 now agrees: median(100, 102, 150) = 102, conf 3.
+    h.aggregator.set_max_deviation_bps(&h.admin, &5_000);
+    let wide = h.aggregator.get_price(&h.token_a, &h.token_b);
+    assert_eq!(wide.price, 102);
+    assert_eq!(wide.confidence, 3);
+}
+
+/// A `deviant` event names each out-of-band source that was dropped.
+#[test]
+fn deviant_event_lists_out_of_band_sources() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::IntoVal;
+
+    let env = Env::default();
+    let h = deploy(&env, 600);
+    let s1 = deploy_source(&env, 100);
+    let s2 = deploy_source(&env, 102);
+    let s3 = deploy_source(&env, 300); // out of band
+    h.aggregator
+        .register_source(&h.admin, &s1, &OracleSourceType::AmmTwap);
+    h.aggregator
+        .register_source(&h.admin, &s2, &OracleSourceType::ClTwap);
+    h.aggregator
+        .register_source(&h.admin, &s3, &OracleSourceType::External);
+    set_now(&env, 1_000);
+
+    h.aggregator.get_price_safe(&h.token_a, &h.token_b);
+
+    let events = env.events().all();
+    let agg_id = h.aggregator.address.clone();
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (symbol_short!("deviant"),).into_val(&env);
+    let deviant_event = events
+        .iter()
+        .find(|e| e.0 == agg_id && e.1 == expected_topics)
+        .expect("deviant event must be emitted when a source is out of band");
+
+    let (deviant_addrs,): (soroban_sdk::Vec<Address>,) = deviant_event.2.into_val(&env);
+    assert_eq!(deviant_addrs.len(), 1);
+    assert!(deviant_addrs.contains(&s3));
 }

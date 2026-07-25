@@ -1,4 +1,17 @@
 #![no_std]
+//! Oracle aggregator: reports the median price over **fresh, agreeing**
+//! sources.
+//!
+//! A quote contributes to the result only when it is both fresh (reported
+//! within `max_staleness_seconds`) and *agreeing* — within a configurable
+//! deviation band (in basis points) of the median of the fresh quotes.
+//! Sources outside the band are dropped and reported via a `deviant` event,
+//! and only agreeing sources are counted toward `confidence`. This ensures a
+//! high confidence score actually implies the sources agree: a single wildly
+//! deviating feed can no longer inflate confidence or drag the reported price
+//! toward an attacker's value. The band defaults to
+//! [`DEFAULT_MAX_DEVIATION_BPS`] and is tunable by the admin via
+//! [`OracleAggregator::set_max_deviation_bps`].
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype,
@@ -42,6 +55,7 @@ pub enum OracleError {
     SourceNotFound = 5,
     InsufficientSources = 6,
     InvalidStaleness = 7,
+    InvalidDeviation = 8,
 }
 
 // ── Storage ────────────────────────────────────────────────────────────────
@@ -51,9 +65,19 @@ pub enum DataKey {
     Admin,
     MaxStaleness,
     Sources,
+    MaxDeviationBps,
 }
 
 pub const MIN_VALID_SOURCES: u32 = 2;
+
+/// Basis-points denominator (100% = 10_000 bps).
+pub const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Default deviation band: a fresh quote must be within 5% of the median of
+/// the fresh quotes to count as agreeing. Chosen tight enough to flag the
+/// "pull the price halfway to the attacker" manipulation described in the
+/// aggregator's threat model, while tolerating normal cross-venue spread.
+pub const DEFAULT_MAX_DEVIATION_BPS: u32 = 500;
 
 // ── Adapter client (UPDATED) ───────────────────────────────────────────────
 
@@ -83,6 +107,9 @@ impl OracleAggregator {
         env.storage()
             .instance()
             .set(&DataKey::MaxStaleness, &max_staleness_seconds);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxDeviationBps, &DEFAULT_MAX_DEVIATION_BPS);
 
         let empty: Vec<OracleSource> = Vec::new(&env);
         env.storage().instance().set(&DataKey::Sources, &empty);
@@ -174,6 +201,9 @@ impl OracleAggregator {
             .unwrap_or(0);
 
         let mut prices: Vec<i128> = Vec::new(env);
+        // Source address paralleling each entry in `prices`, so a deviating
+        // quote can be reported by contract address.
+        let mut fresh_sources: Vec<Address> = Vec::new(env);
         let mut updated: Vec<OracleSource> = Vec::new(env);
         let mut stale_sources: Vec<Address> = Vec::new(env);
 
@@ -193,6 +223,7 @@ impl OracleAggregator {
             if price > 0 && is_fresh {
                 source.last_updated_at = source_timestamp;
                 prices.push_back(price);
+                fresh_sources.push_back(source.source_contract.clone());
                 contributed = true;
             }
 
@@ -216,11 +247,43 @@ impl OracleAggregator {
             env.storage().instance().set(&DataKey::Sources, &updated);
         }
 
-        let median = median_i128(env, &prices);
+        // Reference median over all fresh quotes. The median is robust to a
+        // minority of outliers, so it is a sound centre for the agreement test.
+        let reference_median = median_i128(env, &prices);
+        let max_deviation_bps = read_max_deviation_bps(env);
+
+        // Keep only quotes within the deviation band of the reference median;
+        // everything else is a disagreeing outlier that must not inflate
+        // confidence or move the reported price.
+        let mut agreeing: Vec<i128> = Vec::new(env);
+        let mut deviant_sources: Vec<Address> = Vec::new(env);
+        for i in 0..prices.len() {
+            let price = prices.get_unchecked(i);
+            if within_deviation_band(price, reference_median, max_deviation_bps) {
+                agreeing.push_back(price);
+            } else {
+                deviant_sources.push_back(fresh_sources.get_unchecked(i));
+            }
+        }
+
+        if !deviant_sources.is_empty() {
+            env.events()
+                .publish((symbol_short!("deviant"),), (deviant_sources,));
+        }
+
+        // Too few sources agree — a high-variance quote set. Report no
+        // confidence rather than a price that only looks corroborated.
+        if agreeing.len() < MIN_VALID_SOURCES {
+            return AggregatedPrice { price: 0, confidence: 0 };
+        }
+
+        // Report the median of the agreeing subset so a dropped outlier does
+        // not skew the result, and count only agreeing sources as confidence.
+        let median = median_i128(env, &agreeing);
 
         AggregatedPrice {
             price: median,
-            confidence: prices.len(),
+            confidence: agreeing.len(),
         }
     }
 
@@ -243,6 +306,26 @@ impl OracleAggregator {
         env.storage()
             .instance()
             .set(&DataKey::MaxStaleness, &max_staleness_seconds);
+    }
+
+    /// Returns the deviation band (in bps) a fresh quote must fall within of
+    /// the median to be counted as agreeing.
+    pub fn get_max_deviation_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxDeviationBps)
+            .unwrap_or(DEFAULT_MAX_DEVIATION_BPS)
+    }
+
+    /// Admin: set the agreement deviation band, in bps (must be `1..=10_000`).
+    pub fn set_max_deviation_bps(env: Env, admin: Address, max_deviation_bps: u32) {
+        require_admin(&env, &admin);
+        if max_deviation_bps == 0 || max_deviation_bps as i128 > BPS_DENOMINATOR {
+            panic_with_error!(&env, OracleError::InvalidDeviation);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxDeviationBps, &max_deviation_bps);
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -274,6 +357,26 @@ fn require_admin(env: &Env, claimed: &Address) {
     }
 
     claimed.require_auth();
+}
+
+fn read_max_deviation_bps(env: &Env) -> i128 {
+    let bps: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::MaxDeviationBps)
+        .unwrap_or(DEFAULT_MAX_DEVIATION_BPS);
+    bps as i128
+}
+
+/// Returns `true` when `price` is within `max_deviation_bps` of `median`.
+///
+/// Uses the cross-multiplied form `|price - median| * 10_000 <= bps * median`
+/// to avoid a division (and its precision loss). `median` is always `> 0`
+/// here because it is derived from strictly-positive quotes.
+fn within_deviation_band(price: i128, median: i128, max_deviation_bps: i128) -> bool {
+    let diff = price - median;
+    let abs_diff = if diff < 0 { -diff } else { diff };
+    abs_diff.saturating_mul(BPS_DENOMINATOR) <= max_deviation_bps.saturating_mul(median)
 }
 
 fn median_i128(env: &Env, values: &Vec<i128>) -> i128 {
