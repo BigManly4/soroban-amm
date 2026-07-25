@@ -18,6 +18,11 @@ A full-stack AMM protocol built on Stellar's Soroban smart contract platform. It
   - [Governance Contract](#governance-contract)
   - [TWAP Consumer Contract](#twap-consumer-contract)
   - [Concentrated Liquidity Contract](#concentrated-liquidity-contract)
+- [Error Codes](#error-codes)
+  - [AMM Pool Contract (`AmmError`)](#amm-pool-contract-ammerror)
+  - [Factory Contract (`FactoryError`)](#factory-contract-factoryerror)
+  - [Governance Contract (`GovernanceError`)](#governance-contract-governanceerror)
+  - [LP Token Contract](#lp-token-contract-errors)
 - [Math & Formulas](#math--formulas)
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
@@ -356,6 +361,122 @@ Located in [contracts/token/src/lib.rs](contracts/token/src/lib.rs).
 | `balance(id) → i128` | Read account balance |
 | `allowance(from, spender) → i128` | Read spending allowance |
 | `total_supply() → i128` | Read total tokens minted |
+
+---
+
+## Error Codes
+
+Contract entry points that fail return a typed contract error rather than a
+plain trap. Each error below is transcribed from the contract's
+`#[contracterror]` enum; the numeric code is the enum discriminant that a
+caller observes on-chain (for example as `Error(Contract, #5)`). Clients using
+a generated binding receive the variant name; clients decoding raw XDR receive
+the numeric code.
+
+### AMM Pool Contract (`AmmError`)
+
+Source: [`contracts/amm/src/lib.rs`](contracts/amm/src/lib.rs).
+
+| Code | Variant | Meaning |
+| ---: | --- | --- |
+| 1 | `AlreadyInitialized` | `initialize` was called on a pool that is already initialized. |
+| 2 | `InvalidFeeBps` | The fee (in basis points) is outside the permitted range. |
+| 3 | `InsufficientShares` | The caller holds fewer LP shares than the operation requires. |
+| 4 | `DeadlineExceeded` | The transaction deadline passed before execution. |
+| 5 | `SlippageExceeded` | The output amount fell below (or the input rose above) the caller's limit. |
+| 6 | `Paused` | The pool is paused. |
+| 7 | `Unauthorized` | The caller is not authorized for this action. |
+| 8 | `ZeroAmount` | An amount argument was zero. |
+| 9 | `InvalidToken` | The supplied token is not one of the pool's two tokens. |
+| 10 | `EmptyPool` | The operation needs liquidity but the pool has none. |
+| 11 | `InsufficientLiquidity` | Pool liquidity is too low to satisfy the request. |
+| 12 | `NoPendingAdmin` | An admin transfer was accepted while no pending admin is set. |
+| 13 | `WrongAdmin` | The caller is not the pending admin for the transfer. |
+| 14 | `Reentrant` | A reentrant call was detected during a flash loan or state-mutating operation. |
+| 15 | `CircuitBreaker` | The circuit breaker tripped on excessive single-block price deviation; the pool auto-paused. |
+| 16 | `FotSlippage` | A fee-on-transfer token deducted more than the caller's `min_received` threshold permitted. |
+| 17 | `OracleDeviationExceeded` | Spot price deviated beyond the configured oracle tolerance. |
+| 18 | `FlashLoanRepaymentFailed` | The flash-loan receiver did not return the borrowed amounts plus fees. |
+| 19 | `AlreadyExecuted` | The multisig emergency-withdrawal proposal was already executed. |
+| 20 | `ProposalExpired` | The multisig emergency-withdrawal proposal has expired. |
+
+### Factory Contract (`FactoryError`)
+
+Source: [`contracts/factory/src/lib.rs`](contracts/factory/src/lib.rs).
+
+| Code | Variant | Meaning |
+| ---: | --- | --- |
+| 1 | `AlreadyInitialized` | `initialize` was called on an already-initialized factory. |
+| 2 | `InvalidFeeBps` | The fee (in basis points) is outside the permitted range. |
+| 3 | `PoolAlreadyExists` | A constant-product pool already exists for this token pair. |
+| 4 | `ClPoolAlreadyExists` | A concentrated-liquidity pool already exists for this pair and fee tier. |
+| 5 | `ClWasmNotSet` | CL pool creation was attempted before the CL pool Wasm hash was configured. |
+| 6 | `Unauthorized` | The caller is not authorized (not the admin). |
+| 7 | `FeeNotConfigured` | The requested fee tier has not been configured. |
+| 8 | `RateLimitExceeded` | The pool-creation rate limit was exceeded. |
+| 9 | `CreationPaused` | Pool creation is currently paused. |
+
+### Governance Contract (`GovernanceError`)
+
+Source: [`contracts/governance/src/lib.rs`](contracts/governance/src/lib.rs).
+
+| Code | Variant | Meaning |
+| ---: | --- | --- |
+| 1 | `AlreadyInitialized` | `initialize` was called on an already-initialized contract. |
+| 2 | `InvalidVotingPeriod` | The voting-period parameter is out of range. |
+| 3 | `InvalidTimelock` | The timelock parameter is out of range. |
+| 4 | `InvalidQuorumBps` | The quorum (in basis points) is out of range. |
+| 5 | `InvalidProposerStake` | The proposer-stake parameter is invalid. |
+| 6 | `InvalidFeeBps` | The proposed fee (in basis points) is out of range. |
+| 7 | `ZeroTotalSupply` | LP total supply is zero, so voting power cannot be computed. |
+| 8 | `InsufficientStake` | The proposer holds less than the required stake. |
+| 9 | `ProposalNotFound` | No proposal exists with the given id. |
+| 10 | `VotingNotStarted` | Voting has not yet started for this proposal. |
+| 11 | `VotingPeriodEnded` | The voting period has ended. |
+| 12 | `AlreadyExecuted` | The proposal has already been executed. |
+| 13 | `ProposalCancelled` | The proposal was cancelled. |
+| 14 | `AlreadyVoted` | The caller has already voted on this proposal. |
+| 15 | `NoVotingPower` | The caller has no voting power. |
+| 16 | `VotingPeriodActive` | The action is not allowed while voting is still active. |
+| 17 | `ProposalExpired` | The proposal expired before execution. |
+| 18 | `TimelockNotElapsed` | The timelock has not yet elapsed. |
+| 19 | `QuorumNotMet` | Quorum was not reached. |
+| 20 | `ProposalDefeated` | The proposal did not pass. |
+| 21 | `NotProposer` | The caller is not the proposal's proposer. |
+| 22 | `NoLockedVote` | There is no locked vote to release. |
+| 23 | `ProposalNotConcluded` | The proposal has not concluded yet. |
+| 24 | `CannotDelegateToSelf` | Voting power cannot be delegated to oneself. |
+| 25 | `Unauthorized` | The caller is not authorized for this action. |
+| 26 | `HasDelegated` | The action is not allowed because the caller has delegated their voting power. |
+| 27 | `DelegationCycle` | The delegation would create a cycle. |
+| 28 | `ProposalVetoed` | The proposal was vetoed. |
+| 29 | `VetoWindowExpired` | The veto window has expired. |
+| 30 | `NotVetoMultisig` | The caller is not the veto multisig. |
+| 31 | `InsufficientSnapshotBal` | The snapshot balance is below the required threshold. |
+| 32 | `VetoMultisigNotSet` | The veto multisig address has not been configured. |
+| 33 | `NoPendingAdmin` | An admin transfer was accepted while no pending admin is set. |
+
+### LP Token Contract Errors
+
+Source: [`contracts/token/src/lib.rs`](contracts/token/src/lib.rs).
+
+The LP token contract does not define a `#[contracterror]` enum; it fails with
+assertion/panic messages instead, so there are no numeric discriminants to
+transcribe. Callers observe these as contract traps with the following
+messages:
+
+| Message | Raised when |
+| --- | --- |
+| `already initialized: contract <address>` | `initialize` is called after the token is already initialized. |
+| `amount must be positive` | A `transfer`, `transfer_from`, `mint`, `burn`, `lock`, or `unlock` amount is not greater than zero. |
+| `insufficient allowance: available=<n>, requested=<n>` | `transfer_from` is called for more than the spender's current allowance. |
+| `live_until_ledger must be >= current ledger` | `approve` sets a non-zero allowance whose expiry ledger is already in the past. |
+| `insufficient balance: available=<n>, requested=<n>` | `burn` is called for more than the account's balance. |
+| `insufficient unlocked balance: available=<n>, requested=<n>` | A transfer would spend balance that is currently locked. |
+| `insufficient unlocked balance to lock` | `lock` is called for more than the holder's unlocked balance. |
+| `unlock exceeds locked balance` | `unlock` is called for more than the holder's locked balance. |
+| `current_admin is not admin` | `propose_admin` is called with a `current_admin` that is not the stored admin. |
+| `not pending admin` | `accept_admin` is called by an address that is not the pending admin. |
 
 ---
 
