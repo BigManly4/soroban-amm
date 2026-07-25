@@ -504,25 +504,31 @@ impl BatchAuction {
 
         let spent_before = SepTokenClient::new(env, &order.token_in).balance(sender);
         let swap_result = match venue_type {
-            PoolType::Amm => AmmPoolClient::new(env, &venue).try_swap(
-                sender,
-                &order.token_in,
-                &order.amount_in,
-                &order.min_out,
-                &deadline,
-            ),
-            PoolType::Cl => ConcentratedLiquidityClient::new(env, &venue).try_swap(
-                sender,
-                &order.zero_for_one,
-                &order.amount_in,
-                &order.sqrt_price_limit,
-                &order.min_out,
-                &deadline,
-            ),
+            PoolType::Amm => AmmPoolClient::new(env, &venue)
+                .try_swap(
+                    sender,
+                    &order.token_in,
+                    &order.amount_in,
+                    &order.min_out,
+                    &deadline,
+                )
+                .ok()
+                .and_then(|r| r.ok()),
+            PoolType::Cl => ConcentratedLiquidityClient::new(env, &venue)
+                .try_swap(
+                    sender,
+                    &order.zero_for_one,
+                    &order.amount_in,
+                    &order.sqrt_price_limit,
+                    &order.min_out,
+                    &deadline,
+                )
+                .ok()
+                .and_then(|r| r.ok()),
         };
         let amount_out = match swap_result {
-            Ok(Ok(amount_out)) => amount_out,
-            _ => return Err(()),
+            Some(amount_out) => amount_out,
+            None => return Err(()),
         };
         let spent_after = SepTokenClient::new(env, &order.token_in).balance(sender);
 
