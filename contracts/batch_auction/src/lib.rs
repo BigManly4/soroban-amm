@@ -70,6 +70,11 @@ pub struct Order {
     pub amount_in: i128,
     pub min_out: i128,
     pub submitted_at: u64,
+    /// Trader-supplied deadline (ledger timestamp). Honored verbatim at
+    /// settlement time: if it has passed by the time `settle_batch` runs, the
+    /// order is expired and refunded rather than executed against a
+    /// freshly-computed deadline.
+    pub deadline: u64,
     /// Venue type of `pool`.
     pub pool_type: PoolType,
     /// Swap direction for concentrated-liquidity venues: `true` swaps token A
@@ -285,6 +290,7 @@ impl BatchAuction {
             amount_in,
             min_out,
             submitted_at: env.ledger().timestamp(),
+            deadline,
             pool_type,
             zero_for_one,
             sqrt_price_limit,
@@ -393,7 +399,6 @@ impl BatchAuction {
         }
 
         let auction_addr = env.current_contract_address();
-        let settlement_deadline = now + window_secs;
         let order_limit = max_orders(&env);
         let process_count = if pending.len() > order_limit {
             order_limit
@@ -410,11 +415,29 @@ impl BatchAuction {
                 .get(&DataKey::Order(order_id))
                 .unwrap();
 
+            // Honor the trader's own deadline. If it has already passed by
+            // settlement time, expire the order and refund its escrow rather
+            // than silently substituting a freshly-computed deadline.
+            if now > order.deadline {
+                SepTokenClient::new(&env, &order.token_in).transfer(
+                    &auction_addr,
+                    &order.trader,
+                    &order.amount_in,
+                );
+                results.push_back(0);
+                env.storage().instance().remove(&DataKey::Order(order_id));
+                env.events().publish(
+                    (Symbol::new(&env, "order_expired"), order.trader.clone()),
+                    (order_id,),
+                );
+                continue;
+            }
+
             // Execute the swap on behalf of the batch auction contract, routing
             // to whichever supported venue gives the best output. Authorization
             // for the token pull (auction → pool) is automatically satisfied
             // because the batch_auction is the invoking contract.
-            let amount_out = Self::execute_op(&env, &order, &auction_addr, settlement_deadline);
+            let amount_out = Self::execute_op(&env, &order, &auction_addr, order.deadline);
 
             // Forward output tokens to the original trader.
             SepTokenClient::new(&env, &order.token_out).transfer(
@@ -840,6 +863,74 @@ mod tests {
         // Window has not elapsed — should return BatchWindowOpen error.
         let result = BatchAuctionClient::new(&env, &auction_addr).try_settle_batch();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_settle_batch_honors_order_deadline_not_freshly_computed_one() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, pool, admin) = setup(&env);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+
+        // Trader wants this order to expire well before the batch settles.
+        client.submit_order(&trader, &pool, &ta, &tb, &10_000_i128, &0_i128, &1_010_u64);
+
+        // Tokens are escrowed on submission.
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&trader),
+            90_000_i128
+        );
+
+        // Advance past both the batch window and the order's own deadline.
+        env.ledger().set_timestamp(1031);
+
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 1);
+        // The order was expired, not executed against a freshly-computed
+        // deadline, so no output was produced.
+        assert_eq!(results.get(0).unwrap(), 0);
+
+        // Escrow was refunded in full rather than swapped.
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&trader),
+            100_000_i128
+        );
+        assert_eq!(StellarTokenClient::new(&env, &tb).balance(&trader), 0);
+        assert_eq!(client.get_pending_orders().len(), 0);
+    }
+
+    #[test]
+    fn test_settle_batch_still_executes_orders_within_their_own_deadline() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, pool, admin) = setup(&env);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+
+        // Deadline is after settlement time, so the order must still execute.
+        client.submit_order(&trader, &pool, &ta, &tb, &10_000_i128, &0_i128, &2_000_u64);
+
+        env.ledger().set_timestamp(1031);
+
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 1);
+        assert!(results.get(0).unwrap() > 0);
+        assert!(StellarTokenClient::new(&env, &tb).balance(&trader) > 0);
     }
 
     #[test]
