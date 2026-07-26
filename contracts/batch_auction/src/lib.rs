@@ -493,9 +493,7 @@ impl BatchAuction {
         env.storage()
             .instance()
             .set(&DataKey::PendingOrders, &remaining);
-        if remaining.is_empty() {
-            env.storage().instance().set(&DataKey::BatchOpenedAt, &now);
-        }
+        env.storage().instance().set(&DataKey::BatchOpenedAt, &now);
 
         env.events()
             .publish((symbol_short!("settled"),), (process_count,));
@@ -1310,5 +1308,51 @@ mod tests {
         assert_eq!(best_pool, pool);
         assert_eq!(ptype, PoolType::Amm);
         assert!(best_out > 0);
+    }
+
+    #[test]
+    fn test_partial_settlement_refreshes_batch_opened_at() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, pool, admin) = setup(&env);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+        client.set_max_orders(&admin, &2_u32);
+
+        let trader1 = Address::generate(&env);
+        let trader2 = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader1, &100_000_i128);
+        StellarAssetClient::new(&env, &ta).mint(&trader2, &100_000_i128);
+
+        client.submit_order(&trader1, &pool, &ta, &tb, &10_000_i128, &0_i128, &u64::MAX);
+        client.submit_order(&trader2, &pool, &ta, &tb, &10_000_i128, &0_i128, &u64::MAX);
+
+        // Increase max_orders so we can submit a 3rd order, but set max_orders to 1 before settlement
+        client.set_max_orders(&admin, &1_u32);
+
+        // Advance timestamp past window (1000 + 30 = 1030)
+        env.ledger().set_timestamp(1030);
+
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 1);
+        assert_eq!(client.get_pending_orders().len(), 1);
+
+        let (_pending_count, _max_orders, opened_at, _window_secs) = client.get_batch_info();
+        assert_eq!(opened_at, 1030, "BatchOpenedAt must be refreshed to timestamp of settlement");
+
+        // Submit another order at timestamp 1035
+        env.ledger().set_timestamp(1035);
+        client.set_max_orders(&admin, &5_u32);
+        let trader3 = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader3, &100_000_i128);
+        client.submit_order(&trader3, &pool, &ta, &tb, &10_000_i128, &0_i128, &u64::MAX);
+
+        // Attempting settle_batch at t=1035 must fail because opened_at is 1030 and window is 30s
+        let err = client.try_settle_batch().err().unwrap().unwrap();
+        assert_eq!(err, AuctionError::BatchWindowOpen);
     }
 }
