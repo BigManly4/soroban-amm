@@ -5,7 +5,12 @@
 //!   2. Call `initialize` with the admin address and pre-uploaded WASM hashes
 //!      for the AMM pool and LP token contracts.
 //!   3. Call `create_pool` for each token pair you want a pool for.
-//!   4. Use `get_pool` / `all_pools` to discover deployed pools.
+//!   4. Use `get_pool` / `all_pools` to discover deployed AMM pools, or
+//!      `get_cl_pool` / `all_cl_pools` for concentrated-liquidity pools.
+//!      The two kinds are indexed separately (issue #493) — `all_pools()`
+//!      never returns a CL pool address, since CL pools don't implement the
+//!      AMM-only `get_info`/`withdraw_protocol_fees`/`set_protocol_fee`
+//!      interface that callers of `all_pools()` (e.g. `dex_aggregator`) rely on.
 
 #![no_std]
 
@@ -100,24 +105,26 @@ pub trait GovernanceInterface {
 pub enum DataKey {
     Pool(Address, Address), // normalized (token_a, token_b) → pool Address
     LpToken(Address),       // pool address → LP token address
-    PoolByIndex(u64),       // u64 index -> pool Address
+    PoolByIndex(u64),       // u64 index -> AMM pool Address (issue #493: AMM-only)
     Admin,
     AmmWasmHash,
     TokenWasmHash,
     ClWasmHash,                     // WASM hash for concentrated_liquidity deployments
-    PoolCount,                      // u64 monotonic counter — used to derive unique deploy salts
-    GovernanceFor(Address),         // pool address → Option<Address>
+    PoolCount, // u64 monotonic counter — AMM pools only; also derives deploy salts
+    GovernanceFor(Address), // pool address → Option<Address>
     ClPool(Address, Address, i128), // normalized (token_a, token_b, fee_bps) → CL pool Address
-    PermissionlessMode,             // bool — true = anyone can create pools (with fee)
-    PoolCreationFee,                // i128 — fee charged per pool in permissionless mode
-    FeeToken,                       // Address — token used to pay the pool creation fee
-    RateLimitLedgers,               // u32 — minimum ledgers between pool creations per address
-    LastPoolCreation(Address),      // u32 — ledger when this address last created a pool
-    DefaultFeeTier,                 // i128 — default fee tier ID (0-3) for new pool deployments
-    Treasury,                       // Address — protocol treasury for fee sweeps
-    GlobalProtocolFeeBps,           // i128 — global protocol fee rate (0 = off)
-    PoolTokens(Address),            // pool address → (token_a, token_b) for sweep forwarding
-    CreationPaused,                 // bool — true blocks new V2 and CL pool creation
+    ClPoolByIndex(u64), // u64 index -> CL pool Address (issue #493: separate from PoolByIndex)
+    ClPoolCount, // u64 monotonic counter for CL pools — independent of PoolCount (issue #493)
+    PermissionlessMode, // bool — true = anyone can create pools (with fee)
+    PoolCreationFee, // i128 — fee charged per pool in permissionless mode
+    FeeToken,  // Address — token used to pay the pool creation fee
+    RateLimitLedgers, // u32 — minimum ledgers between pool creations per address
+    LastPoolCreation(Address), // u32 — ledger when this address last created a pool
+    DefaultFeeTier, // i128 — default fee tier ID (0-3) for new pool deployments
+    Treasury,  // Address — protocol treasury for fee sweeps
+    GlobalProtocolFeeBps, // i128 — global protocol fee rate (0 = off)
+    PoolTokens(Address), // pool address → (token_a, token_b) for sweep forwarding
+    CreationPaused, // bool — true blocks new V2 and CL pool creation
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -173,6 +180,7 @@ impl Factory {
             .instance()
             .set(&DataKey::TokenWasmHash, &token_wasm_hash);
         env.storage().instance().set(&DataKey::PoolCount, &0u64);
+        env.storage().instance().set(&DataKey::ClPoolCount, &0u64);
         // Initialize default fee tier to Medium (0.3% = 30 bps)
         env.storage()
             .instance()
@@ -529,14 +537,21 @@ impl Factory {
             .get(&DataKey::ClWasmHash)
             .ok_or(FactoryError::ClWasmNotSet)?;
 
+        // Issue #493: CL pools are indexed and counted separately from AMM
+        // pools (`ClPoolCount`/`ClPoolByIndex`, not `PoolCount`/`PoolByIndex`),
+        // so `all_pools()` — which AMM-only callers like `dex_aggregator` rely
+        // on — never returns a CL pool address. The salt is still offset by
+        // `0x8000_0000_0000_0000` so a CL pool's deploy salt can never collide
+        // with an AMM pool's, even though the two now count independently.
         let n: u64 = env
             .storage()
             .instance()
-            .get(&DataKey::PoolCount)
+            .get(&DataKey::ClPoolCount)
             .unwrap_or(0);
-        // CL pools use n * 3 + 2 so they don't collide with V2 pool/LP/gov salts.
         let cl_salt = Self::make_salt(&env, n * 3 + 2 + 0x8000_0000_0000_0000);
-        env.storage().instance().set(&DataKey::PoolCount, &(n + 1));
+        env.storage()
+            .instance()
+            .set(&DataKey::ClPoolCount, &(n + 1));
 
         let pool_addr = env
             .deployer()
@@ -563,7 +578,7 @@ impl Factory {
 
         env.storage()
             .persistent()
-            .set(&DataKey::PoolByIndex(n), &pool_addr);
+            .set(&DataKey::ClPoolByIndex(n), &pool_addr);
 
         soroban_amm_sdk::emit_versioned_event!(
             env,
@@ -727,7 +742,12 @@ impl Factory {
             .get(&DataKey::ClPool(ta, tb, fee_bps))
     }
 
-    /// Return the addresses of every pool deployed by this factory.
+    /// Return the addresses of every **AMM** pool deployed by this factory.
+    ///
+    /// Never includes CL pools (issue #493) — callers that treat every entry
+    /// as an AMM pool (e.g. `dex_aggregator::discover_tokens`, which calls the
+    /// AMM-only `get_info()`) can rely on that. Use `all_cl_pools()` for CL
+    /// pool addresses.
     pub fn all_pools(env: Env) -> Vec<Address> {
         let count: u64 = env
             .storage()
@@ -743,7 +763,8 @@ impl Factory {
         all
     }
 
-    /// Return the total number of pools deployed by this factory.
+    /// Return the total number of **AMM** pools deployed by this factory.
+    /// See `get_cl_pool_count()` for the CL pool count.
     pub fn get_pool_count(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -751,7 +772,8 @@ impl Factory {
             .unwrap_or(0)
     }
 
-    /// Return up to `limit` pool addresses starting at `offset`.
+    /// Return up to `limit` **AMM** pool addresses starting at `offset`.
+    /// See `get_cl_pools()` for CL pool pagination.
     pub fn get_pools(env: Env, offset: u32, limit: u32) -> Vec<Address> {
         let count: u64 = env
             .storage()
@@ -764,6 +786,51 @@ impl Factory {
         let mut page = Vec::new(&env);
         for i in start..end {
             if let Some(pool) = env.storage().persistent().get(&DataKey::PoolByIndex(i)) {
+                page.push_back(pool);
+            }
+        }
+        page
+    }
+
+    /// Return the addresses of every **CL** (concentrated-liquidity) pool
+    /// deployed by this factory. Mirrors `all_pools()` but for the separately
+    /// indexed CL pool sequence (issue #493).
+    pub fn all_cl_pools(env: Env) -> Vec<Address> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClPoolCount)
+            .unwrap_or(0);
+        let mut all = Vec::new(&env);
+        for i in 0..count {
+            if let Some(pool) = env.storage().persistent().get(&DataKey::ClPoolByIndex(i)) {
+                all.push_back(pool);
+            }
+        }
+        all
+    }
+
+    /// Return the total number of CL pools deployed by this factory.
+    pub fn get_cl_pool_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ClPoolCount)
+            .unwrap_or(0)
+    }
+
+    /// Return up to `limit` CL pool addresses starting at `offset`.
+    pub fn get_cl_pools(env: Env, offset: u32, limit: u32) -> Vec<Address> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClPoolCount)
+            .unwrap_or(0);
+        let start = (offset as u64).min(count);
+        let end = (start + limit as u64).min(count);
+
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            if let Some(pool) = env.storage().persistent().get(&DataKey::ClPoolByIndex(i)) {
                 page.push_back(pool);
             }
         }
@@ -1373,6 +1440,50 @@ mod tests {
 
         factory.create_pool_with_fee_bps(&admin, &ta, &tc, &30_i128, &None);
         assert_eq!(factory.all_pools().len(), 2);
+    }
+
+    /// Issue #493: `create_cl_pool` used to share the AMM-only `PoolCount`/
+    /// `PoolByIndex` sequence, so a CL pool address leaked into `all_pools()`
+    /// once any CL pool had ever been created — breaking every caller (like
+    /// `dex_aggregator::discover_tokens`) that assumes every `all_pools()`
+    /// entry implements the AMM `get_info()` interface.
+    #[test]
+    fn test_all_pools_excludes_cl_pools() {
+        let env = Env::default();
+        env.budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let amm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let token_hash = env.deployer().upload_contract_wasm(token::WASM);
+        let cl_hash = env
+            .deployer()
+            .upload_contract_wasm(concentrated_liquidity::WASM);
+
+        let admin = Address::generate(&env);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(&env, &factory_addr);
+        factory.initialize(&admin, &amm_hash, &token_hash);
+        factory.set_cl_wasm_hash(&cl_hash);
+
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+
+        let (amm_pool, _) = factory.create_pool_with_fee_bps(&admin, &ta, &tb, &30_i128, &None);
+        let cl_pool = factory.create_cl_pool(&admin, &ta, &tb, &5_i128, &0_i32);
+
+        // The CL pool must never show up in the AMM-only listing/count.
+        let all = factory.all_pools();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.get(0).unwrap(), amm_pool);
+        assert_eq!(factory.get_pool_count(), 1);
+        assert_eq!(factory.get_pools(&0, &10).len(), 1);
+
+        // The CL pool is discoverable through its own dedicated accessors.
+        let all_cl = factory.all_cl_pools();
+        assert_eq!(all_cl.len(), 1);
+        assert_eq!(all_cl.get(0).unwrap(), cl_pool);
+        assert_eq!(factory.get_cl_pool_count(), 1);
+        assert_eq!(factory.get_cl_pools(&0, &10).len(), 1);
     }
 
     // ── Issue #96: LP token name/symbol reflect the token pair ───────────────
@@ -2062,6 +2173,52 @@ mod tests {
         assert_eq!(updated, 1);
 
         // The pool's fee_recipient must now be the factory contract.
+        let (recipient, bps) = amm_client.get_protocol_fee();
+        assert_eq!(recipient, Some(factory_addr.clone()));
+        assert_eq!(bps, 5_i128);
+    }
+
+    /// Issue #493 (same root cause): `sync_global_fee_page` walks the shared
+    /// `PoolByIndex` sequence and, unlike `sweep_fees_page`, had no guard
+    /// against non-AMM entries — it would call the AMM-only
+    /// `set_protocol_fee()` on whatever address it found. Before CL pools got
+    /// their own counter/index, a factory with even one CL pool would trap
+    /// here as soon as the loop reached it. Now that CL pools are indexed
+    /// separately, `set_global_fee` must skip them cleanly (0 CL pools ever
+    /// enter this loop) and only report the AMM pool as updated.
+    #[test]
+    fn test_set_global_fee_skips_cl_pools() {
+        let env = Env::default();
+        env.budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let amm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let token_hash = env.deployer().upload_contract_wasm(token::WASM);
+        let cl_hash = env
+            .deployer()
+            .upload_contract_wasm(concentrated_liquidity::WASM);
+
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(&env, &factory_addr);
+        factory.initialize(&admin, &amm_hash, &token_hash);
+        factory.set_cl_wasm_hash(&cl_hash);
+
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+
+        let (pool_addr, _) = factory.create_pool_with_fee_bps(&admin, &ta, &tb, &30_i128, &None);
+        // Creating a CL pool for the same pair must not disturb the AMM fee sync.
+        factory.create_cl_pool(&admin, &ta, &tb, &5_i128, &0_i32);
+
+        factory.set_treasury(&admin, &treasury, &10_i128);
+
+        // Must not trap on the CL pool and must only update the AMM pool.
+        let updated = factory.set_global_fee(&admin, &5_i128);
+        assert_eq!(updated, 1);
+
+        let amm_client = amm::AmmPoolClient::new(&env, &pool_addr);
         let (recipient, bps) = amm_client.get_protocol_fee();
         assert_eq!(recipient, Some(factory_addr.clone()));
         assert_eq!(bps, 5_i128);
