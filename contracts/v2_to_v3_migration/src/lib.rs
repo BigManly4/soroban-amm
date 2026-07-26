@@ -14,23 +14,23 @@
 
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractclient, contractimpl, contracterror, contracttype, Address, Env,
-};
 use soroban_sdk::token::Client as TokenClient;
+use soroban_sdk::{
+    contract, contractclient, contracterror, contractimpl, contracttype, Address, Env,
+};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MigrationError {
-    NotInitialized    = 1,
+    NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized      = 3,
-    ZeroShares        = 4,
-    InvalidRange      = 5,
-    SlippageExceeded  = 6,
-    MigrationFailed   = 7,
+    Unauthorized = 3,
+    ZeroShares = 4,
+    InvalidRange = 5,
+    SlippageExceeded = 6,
+    MigrationFailed = 7,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -247,7 +247,14 @@ impl MigrationContract {
 
         env.events().publish(
             (soroban_sdk::Symbol::new(&env, "migrated"), provider.clone()),
-            (v2_shares, deposited_a, deposited_b, position_id, refund_a, refund_b),
+            (
+                v2_shares,
+                deposited_a,
+                deposited_b,
+                position_id,
+                refund_a,
+                refund_b,
+            ),
         );
 
         Ok(MigrationResult {

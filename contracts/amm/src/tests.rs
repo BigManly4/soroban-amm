@@ -344,11 +344,7 @@ pub(crate) struct RemoveLiquidity<'a> {
 }
 
 impl<'a> RemoveLiquidity<'a> {
-    pub(crate) fn new(
-        amm: &'a AmmPoolClient<'a>,
-        provider: &'a Address,
-        shares: i128,
-    ) -> Self {
+    pub(crate) fn new(amm: &'a AmmPoolClient<'a>, provider: &'a Address, shares: i128) -> Self {
         Self {
             amm,
             provider,
@@ -457,19 +453,31 @@ fn test_set_protocol_fee_rejects_full_capture() {
 
     // protocol_fee_bps == fee_bps (30) must be rejected (M-02 fix).
     let result = amm.try_set_protocol_fee(&admin, &fee_recipient, &30_i128);
-    assert!(result.is_err(), "protocol_fee_bps == fee_bps must be rejected");
+    assert!(
+        result.is_err(),
+        "protocol_fee_bps == fee_bps must be rejected"
+    );
 
     // protocol_fee_bps > fee_bps must still be rejected.
     let result2 = amm.try_set_protocol_fee(&admin, &fee_recipient, &31_i128);
-    assert!(result2.is_err(), "protocol_fee_bps > fee_bps must be rejected");
+    assert!(
+        result2.is_err(),
+        "protocol_fee_bps > fee_bps must be rejected"
+    );
 
     // A valid strict value (29) must still be accepted.
     let result3 = amm.try_set_protocol_fee(&admin, &fee_recipient, &29_i128);
-    assert!(result3.is_ok(), "protocol_fee_bps < fee_bps must be accepted");
+    assert!(
+        result3.is_ok(),
+        "protocol_fee_bps < fee_bps must be accepted"
+    );
 
     // Zero protocol fee must always be accepted regardless of fee_bps.
     let result4 = amm.try_set_protocol_fee(&admin, &fee_recipient, &0_i128);
-    assert!(result4.is_ok(), "protocol_fee_bps == 0 must always be accepted");
+    assert!(
+        result4.is_ok(),
+        "protocol_fee_bps == 0 must always be accepted"
+    );
 }
 
 #[test]
@@ -708,8 +716,8 @@ fn test_swap_exact_out_normal_path() {
     let trader = Address::generate(env);
     ta_sac.mint(&trader, &(required_in + 1_000));
 
-    let spent = SwapExactOut::new(&amm, &trader, &ts.tb_addr, want_out, required_in + 1_000)
-        .execute();
+    let spent =
+        SwapExactOut::new(&amm, &trader, &ts.tb_addr, want_out, required_in + 1_000).execute();
 
     assert_eq!(spent, required_in);
     let info = amm.get_info();
@@ -1056,8 +1064,7 @@ fn test_swap_emits_token_out_in_event_payload() {
     let swap_event = events
         .iter()
         .find(|e| {
-            e.0 == amm.address
-                && e.1 == (Symbol::new(env, "swap"), trader.clone()).into_val(env)
+            e.0 == amm.address && e.1 == (Symbol::new(env, "swap"), trader.clone()).into_val(env)
         })
         .expect("swap event not found");
 
@@ -1533,13 +1540,8 @@ fn test_remove_liquidity_one_sided() {
 
     // Remove one-sided: provider wants only token_a.
     // min_out = 1_000_000 ensures at least the proportional withdrawal.
-    let total_out = amm.remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &1_000_000_i128,
-        &u64::MAX,
-    );
+    let total_out =
+        amm.remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &1_000_000_i128, &u64::MAX);
 
     let ta_after = ta_client.balance(&provider);
     let tb_after = tb_client.balance(&provider);
@@ -1575,13 +1577,8 @@ fn test_remove_liquidity_one_sided_slippage_fails() {
     let shares = AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
 
     // min_out set impossibly high — must fail.
-    let result = amm.try_remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &i128::MAX,
-        &u64::MAX,
-    );
+    let result =
+        amm.try_remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &i128::MAX, &u64::MAX);
     assert!(result.is_err());
 }
 

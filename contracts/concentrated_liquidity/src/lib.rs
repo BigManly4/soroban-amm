@@ -7,7 +7,7 @@ pub mod tick_bitmap;
 
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracterror, contracttype, symbol_short, Address,
+    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
     Env, Vec,
 };
 
@@ -45,18 +45,18 @@ pub enum ClError {
     SlippageExceeded = 6,
     ZeroLiquidity = 7,
     InsufficientLiquidity = 8,
-    PositionNotFound    = 9,
-    DeadlineExpired     = 10,
-    Paused              = 11,
-    Unauthorized        = 12,
-    TickNotAligned      = 13, // tick is not a multiple of tick_spacing
-    InvalidTickSpacing  = 14, // tick_spacing must be > 0
-    TickNotInitialized  = 15, // requested tick has no liquidity (never touched by a position)
-    InvalidToken        = 16, // token_in is not token_a or token_b
-    RangeOrderInRange   = 17, // range order must be fully out-of-range at creation
+    PositionNotFound = 9,
+    DeadlineExpired = 10,
+    Paused = 11,
+    Unauthorized = 12,
+    TickNotAligned = 13,     // tick is not a multiple of tick_spacing
+    InvalidTickSpacing = 14, // tick_spacing must be > 0
+    TickNotInitialized = 15, // requested tick has no liquidity (never touched by a position)
+    InvalidToken = 16,       // token_in is not token_a or token_b
+    RangeOrderInRange = 17,  // range order must be fully out-of-range at creation
     OracleDeviationExceeded = 18,
-    NftNotConfigured    = 19, // no position-NFT contract is wired into the pool
-    NotNftOwner         = 20, // caller does not currently own the position NFT
+    NftNotConfigured = 19, // no position-NFT contract is wired into the pool
+    NotNftOwner = 20,      // caller does not currently own the position NFT
 }
 
 /// Status of a range order (issue #295).
@@ -262,9 +262,15 @@ impl ConcentratedLiquidity {
             .instance()
             .set(&DataKey::ActiveLiquidity, &0_i128);
         let init_ts = env.ledger().timestamp();
-        env.storage().instance().set(&DataKey::TickCumulative, &0_i64);
-        env.storage().instance().set(&DataKey::LastOracleTimestamp, &init_ts);
-        env.storage().instance().set(&DataKey::OraclePoint(init_ts), &0_i64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TickCumulative, &0_i64);
+        env.storage()
+            .instance()
+            .set(&DataKey::LastOracleTimestamp, &init_ts);
+        env.storage()
+            .instance()
+            .set(&DataKey::OraclePoint(init_ts), &0_i64);
         env.storage()
             .instance()
             .set(&DataKey::OracleAggregator, &Option::<Address>::None);
@@ -298,11 +304,7 @@ impl ConcentratedLiquidity {
     ///
     /// The NFT contract must be initialized with this pool's address as its
     /// `cl_pool`, otherwise mint/burn calls from the pool will be rejected.
-    pub fn set_position_nft(
-        env: Env,
-        admin: Address,
-        nft: Option<Address>,
-    ) -> Result<(), ClError> {
+    pub fn set_position_nft(env: Env, admin: Address, nft: Option<Address>) -> Result<(), ClError> {
         let stored: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if admin != stored {
             return Err(ClError::Unauthorized);
@@ -389,12 +391,18 @@ impl ConcentratedLiquidity {
             return Err(ClError::Unauthorized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
     }
 
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ClError> {
-        let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin).unwrap_or(None);
+        let pending: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or(None);
         let pending_addr = pending.ok_or(ClError::Unauthorized)?;
         if new_admin != pending_addr {
             return Err(ClError::Unauthorized);
@@ -405,7 +413,12 @@ impl ConcentratedLiquidity {
         Ok(())
     }
 
-    pub fn set_protocol_fee(env: Env, admin: Address, recipient: Address, bps: i128) -> Result<(), ClError> {
+    pub fn set_protocol_fee(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+        bps: i128,
+    ) -> Result<(), ClError> {
         let stored: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if admin != stored {
             return Err(ClError::Unauthorized);
@@ -415,7 +428,9 @@ impl ConcentratedLiquidity {
             return Err(ClError::InvalidFeeBps);
         }
         env.storage().instance().set(&DataKey::ProtocolFeeBps, &bps);
-        env.storage().instance().set(&DataKey::ProtocolFeeRecipient, &recipient);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProtocolFeeRecipient, &recipient);
         Ok(())
     }
 
@@ -425,19 +440,43 @@ impl ConcentratedLiquidity {
             return Err(ClError::Unauthorized);
         }
         admin.require_auth();
-        let recipient: Address = env.storage().instance().get(&DataKey::ProtocolFeeRecipient).unwrap_or_else(|| stored.clone());
+        let recipient: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProtocolFeeRecipient)
+            .unwrap_or_else(|| stored.clone());
 
-        let accrued_a: i128 = env.storage().instance().get(&DataKey::AccruedProtocolFeeA).unwrap_or(0);
+        let accrued_a: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccruedProtocolFeeA)
+            .unwrap_or(0);
         if accrued_a > 0 {
             let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
-            TokenClient::new(&env, &token_a).transfer(&env.current_contract_address(), &recipient, &accrued_a);
-            env.storage().instance().set(&DataKey::AccruedProtocolFeeA, &0_i128);
+            TokenClient::new(&env, &token_a).transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &accrued_a,
+            );
+            env.storage()
+                .instance()
+                .set(&DataKey::AccruedProtocolFeeA, &0_i128);
         }
-        let accrued_b: i128 = env.storage().instance().get(&DataKey::AccruedProtocolFeeB).unwrap_or(0);
+        let accrued_b: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccruedProtocolFeeB)
+            .unwrap_or(0);
         if accrued_b > 0 {
             let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
-            TokenClient::new(&env, &token_b).transfer(&env.current_contract_address(), &recipient, &accrued_b);
-            env.storage().instance().set(&DataKey::AccruedProtocolFeeB, &0_i128);
+            TokenClient::new(&env, &token_b).transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &accrued_b,
+            );
+            env.storage()
+                .instance()
+                .set(&DataKey::AccruedProtocolFeeB, &0_i128);
         }
         Ok(())
     }
@@ -482,8 +521,8 @@ impl ConcentratedLiquidity {
             .get(&DataKey::MaxOracleDeviationBps)
             .unwrap_or(500);
 
-        let agg = OracleAggregatorClient::new(env, &oracle_addr)
-            .get_price_safe(token_in, token_out);
+        let agg =
+            OracleAggregatorClient::new(env, &oracle_addr).get_price_safe(token_in, token_out);
         if agg.confidence == 0 || agg.price <= 0 {
             return Ok(());
         }
@@ -570,14 +609,18 @@ impl ConcentratedLiquidity {
         let (fg_inside_a, fg_inside_b) =
             Self::fee_growth_inside(env.clone(), lower_tick, upper_tick);
 
-        let mut pos: Position = env.storage().persistent().get(&pos_key).unwrap_or(Position {
-            lower_tick,
-            upper_tick,
-            liquidity: 0,
-            fee_growth_inside_a: fg_inside_a,
-            fee_growth_inside_b: fg_inside_b,
-            tokens_owed: (0, 0),
-        });
+        let mut pos: Position = env
+            .storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or(Position {
+                lower_tick,
+                upper_tick,
+                liquidity: 0,
+                fee_growth_inside_a: fg_inside_a,
+                fee_growth_inside_b: fg_inside_b,
+                tokens_owed: (0, 0),
+            });
         // A position is "fresh" when it currently holds no liquidity — either
         // brand new or fully burned earlier. Freshly opened positions get a
         // receipt NFT minted below (issue #348).
@@ -952,14 +995,18 @@ impl ConcentratedLiquidity {
         let (fg_inside_a, fg_inside_b) =
             Self::fee_growth_inside(env.clone(), lower_tick, upper_tick);
 
-        let mut pos: Position = env.storage().persistent().get(&pos_key).unwrap_or(Position {
-            lower_tick,
-            upper_tick,
-            liquidity: 0,
-            fee_growth_inside_a: fg_inside_a,
-            fee_growth_inside_b: fg_inside_b,
-            tokens_owed: (0, 0),
-        });
+        let mut pos: Position = env
+            .storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or(Position {
+                lower_tick,
+                upper_tick,
+                liquidity: 0,
+                fee_growth_inside_a: fg_inside_a,
+                fee_growth_inside_b: fg_inside_b,
+                tokens_owed: (0, 0),
+            });
         let was_empty = pos.liquidity == 0;
         let (oa, ob) = Self::pending_fees(&pos, fg_inside_a, fg_inside_b);
         pos.tokens_owed = (pos.tokens_owed.0 + oa, pos.tokens_owed.1 + ob);
@@ -1252,8 +1299,9 @@ impl ConcentratedLiquidity {
         // No pause guard — LPs must always be able to exit.
         provider.require_auth();
         Self::ensure_legacy_owner(&env, &provider, lower_tick, upper_tick)?;
-        let res =
-            Self::burn_position_core(&env, &provider, &provider, lower_tick, upper_tick, liquidity)?;
+        let res = Self::burn_position_core(
+            &env, &provider, &provider, lower_tick, upper_tick, liquidity,
+        )?;
         Self::cleanup_nft_if_closed(&env, &provider, lower_tick, upper_tick);
         Ok(res)
     }
@@ -1389,15 +1437,7 @@ impl ConcentratedLiquidity {
             .instance()
             .get(&DataKey::FeeGrowthGlobalB)
             .unwrap_or(0);
-        Self::update_tick(
-            env,
-            lower_tick,
-            current_tick,
-            -liquidity,
-            false,
-            fg_a,
-            fg_b,
-        );
+        Self::update_tick(env, lower_tick, current_tick, -liquidity, false, fg_a, fg_b);
         Self::update_tick(env, upper_tick, current_tick, -liquidity, true, fg_a, fg_b);
 
         if current_tick >= lower_tick && current_tick < upper_tick {
@@ -1788,7 +1828,11 @@ impl ConcentratedLiquidity {
         let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
         let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
 
-        let protocol_fee_bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+        let protocol_fee_bps: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap_or(0);
 
         // Update tick accumulator before changing current tick
         let now = env.ledger().timestamp();
@@ -1931,21 +1975,47 @@ impl ConcentratedLiquidity {
 
                     if zero_for_one {
                         if protocol_fee > 0 {
-                            let accrued_a: i128 = env.storage().instance().get(&DataKey::AccruedProtocolFeeA).unwrap_or(0);
-                            env.storage().instance().set(&DataKey::AccruedProtocolFeeA, &(accrued_a + protocol_fee));
+                            let accrued_a: i128 = env
+                                .storage()
+                                .instance()
+                                .get(&DataKey::AccruedProtocolFeeA)
+                                .unwrap_or(0);
+                            env.storage()
+                                .instance()
+                                .set(&DataKey::AccruedProtocolFeeA, &(accrued_a + protocol_fee));
                         }
                         if lp_fee > 0 {
-                            let fg_a: i128 = env.storage().instance().get(&DataKey::FeeGrowthGlobalA).unwrap_or(0);
-                            env.storage().instance().set(&DataKey::FeeGrowthGlobalA, &(fg_a + lp_fee * 1_000_000 / active_liquidity));
+                            let fg_a: i128 = env
+                                .storage()
+                                .instance()
+                                .get(&DataKey::FeeGrowthGlobalA)
+                                .unwrap_or(0);
+                            env.storage().instance().set(
+                                &DataKey::FeeGrowthGlobalA,
+                                &(fg_a + lp_fee * 1_000_000 / active_liquidity),
+                            );
                         }
                     } else {
                         if protocol_fee > 0 {
-                            let accrued_b: i128 = env.storage().instance().get(&DataKey::AccruedProtocolFeeB).unwrap_or(0);
-                            env.storage().instance().set(&DataKey::AccruedProtocolFeeB, &(accrued_b + protocol_fee));
+                            let accrued_b: i128 = env
+                                .storage()
+                                .instance()
+                                .get(&DataKey::AccruedProtocolFeeB)
+                                .unwrap_or(0);
+                            env.storage()
+                                .instance()
+                                .set(&DataKey::AccruedProtocolFeeB, &(accrued_b + protocol_fee));
                         }
                         if lp_fee > 0 {
-                            let fg_b: i128 = env.storage().instance().get(&DataKey::FeeGrowthGlobalB).unwrap_or(0);
-                            env.storage().instance().set(&DataKey::FeeGrowthGlobalB, &(fg_b + lp_fee * 1_000_000 / active_liquidity));
+                            let fg_b: i128 = env
+                                .storage()
+                                .instance()
+                                .get(&DataKey::FeeGrowthGlobalB)
+                                .unwrap_or(0);
+                            env.storage().instance().set(
+                                &DataKey::FeeGrowthGlobalB,
+                                &(fg_b + lp_fee * 1_000_000 / active_liquidity),
+                            );
                         }
                     }
                 }
@@ -2010,21 +2080,49 @@ impl ConcentratedLiquidity {
 
                         if zero_for_one {
                             if protocol_fee > 0 {
-                                let accrued_a: i128 = env.storage().instance().get(&DataKey::AccruedProtocolFeeA).unwrap_or(0);
-                                env.storage().instance().set(&DataKey::AccruedProtocolFeeA, &(accrued_a + protocol_fee));
+                                let accrued_a: i128 = env
+                                    .storage()
+                                    .instance()
+                                    .get(&DataKey::AccruedProtocolFeeA)
+                                    .unwrap_or(0);
+                                env.storage().instance().set(
+                                    &DataKey::AccruedProtocolFeeA,
+                                    &(accrued_a + protocol_fee),
+                                );
                             }
                             if lp_fee > 0 {
-                                let fg_a: i128 = env.storage().instance().get(&DataKey::FeeGrowthGlobalA).unwrap_or(0);
-                                env.storage().instance().set(&DataKey::FeeGrowthGlobalA, &(fg_a + lp_fee * 1_000_000 / active_liquidity));
+                                let fg_a: i128 = env
+                                    .storage()
+                                    .instance()
+                                    .get(&DataKey::FeeGrowthGlobalA)
+                                    .unwrap_or(0);
+                                env.storage().instance().set(
+                                    &DataKey::FeeGrowthGlobalA,
+                                    &(fg_a + lp_fee * 1_000_000 / active_liquidity),
+                                );
                             }
                         } else {
                             if protocol_fee > 0 {
-                                let accrued_b: i128 = env.storage().instance().get(&DataKey::AccruedProtocolFeeB).unwrap_or(0);
-                                env.storage().instance().set(&DataKey::AccruedProtocolFeeB, &(accrued_b + protocol_fee));
+                                let accrued_b: i128 = env
+                                    .storage()
+                                    .instance()
+                                    .get(&DataKey::AccruedProtocolFeeB)
+                                    .unwrap_or(0);
+                                env.storage().instance().set(
+                                    &DataKey::AccruedProtocolFeeB,
+                                    &(accrued_b + protocol_fee),
+                                );
                             }
                             if lp_fee > 0 {
-                                let fg_b: i128 = env.storage().instance().get(&DataKey::FeeGrowthGlobalB).unwrap_or(0);
-                                env.storage().instance().set(&DataKey::FeeGrowthGlobalB, &(fg_b + lp_fee * 1_000_000 / active_liquidity));
+                                let fg_b: i128 = env
+                                    .storage()
+                                    .instance()
+                                    .get(&DataKey::FeeGrowthGlobalB)
+                                    .unwrap_or(0);
+                                env.storage().instance().set(
+                                    &DataKey::FeeGrowthGlobalB,
+                                    &(fg_b + lp_fee * 1_000_000 / active_liquidity),
+                                );
                             }
                         }
                     }
@@ -2117,7 +2215,12 @@ impl ConcentratedLiquidity {
             soroban_amm_sdk::emit_versioned_event!(
                 env,
                 (symbol_short!("price_upd"), token_in, token_out),
-                (amount_in_actual, amount_out_total, sqrt_price_x96, current_tick)
+                (
+                    amount_in_actual,
+                    amount_out_total,
+                    sqrt_price_x96,
+                    current_tick
+                )
             );
         }
 
@@ -3309,14 +3412,20 @@ mod tests {
             .mint_position(&te.provider, &-100, &100, &100_000, &100_000, &0, &0);
 
         // zero_for_one = true → token_in = token_a, token_out = token_b.
-        let amount_out = te.client.swap(&te.provider, &true, &1_000, &0, &0, &u64::MAX);
+        let amount_out = te
+            .client
+            .swap(&te.provider, &true, &1_000, &0, &0, &u64::MAX);
         assert!(amount_out > 0);
 
         let state = te.client.get_pool_state();
 
         use soroban_sdk::{testutils::Events as _, IntoVal, Val, Vec as SdkVec};
-        let expected_topics: SdkVec<Val> =
-            (symbol_short!("price_upd"), te.token_a.clone(), te.token_b.clone()).into_val(&env);
+        let expected_topics: SdkVec<Val> = (
+            symbol_short!("price_upd"),
+            te.token_a.clone(),
+            te.token_b.clone(),
+        )
+            .into_val(&env);
         let event = env
             .events()
             .all()
@@ -3598,7 +3707,10 @@ mod test {
         let (amount_a, amount_b) =
             client.burn_position(&provider, &lower_tick, &upper_tick, &liquidity);
         // Burn must return approximately the same amount as mint (±1 rounding), token_a only.
-        assert!((amount_a - mint_a).abs() <= 1, "burn_a={amount_a} expected ~{mint_a}");
+        assert!(
+            (amount_a - mint_a).abs() <= 1,
+            "burn_a={amount_a} expected ~{mint_a}"
+        );
         assert_eq!(amount_b, 0_i128);
 
         let expected_topics: SdkVec<Val> =
@@ -3925,8 +4037,14 @@ mod test_new_features {
             &u64::MAX,
         );
 
-        assert_eq!(added_a, quote.0, "modify_position must use the current-price quote for token A");
-        assert_eq!(added_b, quote.1, "modify_position must use the current-price quote for token B");
+        assert_eq!(
+            added_a, quote.0,
+            "modify_position must use the current-price quote for token A"
+        );
+        assert_eq!(
+            added_b, quote.1,
+            "modify_position must use the current-price quote for token B"
+        );
 
         let position_after = client.get_position(&provider, &-200_i32, &-1_i32);
         assert_eq!(
@@ -3936,7 +4054,11 @@ mod test_new_features {
         );
 
         let positions_after = client.get_positions(&provider);
-        assert_eq!(positions_after.len(), 1, "storage must be reused for the same range");
+        assert_eq!(
+            positions_after.len(),
+            1,
+            "storage must be reused for the same range"
+        );
         assert_eq!(
             positions_after.get(0).unwrap(),
             (-200_i32, -1_i32),
@@ -4814,16 +4936,15 @@ mod test_single_token_deposit {
         let (provider, token_a, _token_b, client) = setup_pool(&env, -200);
 
         // First, find out how much liquidity a 10_000 deposit produces.
-        let normal = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let normal = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         // Now request more than that — must fail.
         let provider2 = Address::generate(&env);
@@ -4981,27 +5102,25 @@ mod test_single_token_deposit {
         let env = Env::default();
         let (provider, token_a, _token_b, client) = setup_pool(&env, -200);
 
-        let r1 = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let r1 = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
-        let r2 = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let r2 = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         let pos = client.get_position(&provider, &100_i32, &200_i32);
         assert_eq!(
@@ -5020,19 +5139,17 @@ mod test_single_token_deposit {
         let (provider, token_a, _token_b, client) = setup_pool(&env, -200);
 
         let amount_in = 20_000_i128;
-        let quote = client
-            .quote_single_token_deposit(&100_i32, &200_i32, &token_a, &amount_in);
+        let quote = client.quote_single_token_deposit(&100_i32, &200_i32, &token_a, &amount_in);
 
-        let actual = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &amount_in,
-                &1_i128,
-                &u64::MAX,
-            );
+        let actual = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &amount_in,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert_eq!(
             quote.amount_used, actual.amount_used,
@@ -5051,19 +5168,17 @@ mod test_single_token_deposit {
         let (provider, _token_a, token_b, client) = setup_pool(&env, 300);
 
         let amount_in = 20_000_i128;
-        let quote = client
-            .quote_single_token_deposit(&-200_i32, &-100_i32, &token_b, &amount_in);
+        let quote = client.quote_single_token_deposit(&-200_i32, &-100_i32, &token_b, &amount_in);
 
-        let actual = client
-            .mint_position_single_token(
-                &provider,
-                &-200_i32,
-                &-100_i32,
-                &token_b,
-                &amount_in,
-                &1_i128,
-                &u64::MAX,
-            );
+        let actual = client.mint_position_single_token(
+            &provider,
+            &-200_i32,
+            &-100_i32,
+            &token_b,
+            &amount_in,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert_eq!(quote.amount_used, actual.amount_used);
         assert_eq!(quote.dust, actual.dust);
@@ -5076,19 +5191,17 @@ mod test_single_token_deposit {
         let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
 
         let amount_in = 100_000_i128;
-        let quote = client
-            .quote_single_token_deposit(&-100_i32, &100_i32, &token_a, &amount_in);
+        let quote = client.quote_single_token_deposit(&-100_i32, &100_i32, &token_a, &amount_in);
 
-        let actual = client
-            .mint_position_single_token(
-                &provider,
-                &-100_i32,
-                &100_i32,
-                &token_a,
-                &amount_in,
-                &1_i128,
-                &u64::MAX,
-            );
+        let actual = client.mint_position_single_token(
+            &provider,
+            &-100_i32,
+            &100_i32,
+            &token_a,
+            &amount_in,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert_eq!(quote.amount_used, actual.amount_used);
         assert_eq!(quote.dust, actual.dust);
@@ -5104,16 +5217,15 @@ mod test_single_token_deposit {
         let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
 
         let liq_before = client.active_liquidity();
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &-100_i32,
-                &100_i32,
-                &token_a,
-                &50_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &-100_i32,
+            &100_i32,
+            &token_a,
+            &50_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         let liq_after = client.active_liquidity();
         assert_eq!(
@@ -5131,16 +5243,15 @@ mod test_single_token_deposit {
         let (provider, token_a, _token_b, client) = setup_pool(&env, -200);
 
         let liq_before = client.active_liquidity();
-        client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &50_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &50_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert_eq!(
             client.active_liquidity(),
@@ -5160,16 +5271,15 @@ mod test_single_token_deposit {
         assert!(!client.is_tick_initialized(&100_i32));
         assert!(!client.is_tick_initialized(&200_i32));
 
-        client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert!(
             client.is_tick_initialized(&100_i32),
@@ -5189,16 +5299,15 @@ mod test_single_token_deposit {
         let env = Env::default();
         let (provider, token_a, _token_b, client) = setup_pool(&env, -200);
 
-        client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         let positions = client.get_positions(&provider);
         assert_eq!(positions.len(), 1);
@@ -5215,35 +5324,39 @@ mod test_single_token_deposit {
         // Pool A: current below range → token_a deposit.
         let env_a = Env::default();
         let (provider_a, token_a_a, _token_b_a, client_a) = setup_pool(&env_a, -300);
-        let result_a = client_a
-            .mint_position_single_token(
-                &provider_a,
-                &-200_i32,
-                &-100_i32,
-                &token_a_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result_a = client_a.mint_position_single_token(
+            &provider_a,
+            &-200_i32,
+            &-100_i32,
+            &token_a_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         // Pool B: current above range → token_b deposit.
         let env_b = Env::default();
         let (provider_b, _token_a_b, token_b_b, client_b) = setup_pool(&env_b, -50);
-        let result_b = client_b
-            .mint_position_single_token(
-                &provider_b,
-                &-200_i32,
-                &-100_i32,
-                &token_b_b,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result_b = client_b.mint_position_single_token(
+            &provider_b,
+            &-200_i32,
+            &-100_i32,
+            &token_b_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         // Both deposits should produce positive liquidity (exact equality not guaranteed
         // for asymmetric tick ranges, but both should succeed).
-        assert!(result_a.liquidity > 0, "below-range deposit must produce positive liquidity");
-        assert!(result_b.liquidity > 0, "above-range deposit must produce positive liquidity");
+        assert!(
+            result_a.liquidity > 0,
+            "below-range deposit must produce positive liquidity"
+        );
+        assert!(
+            result_b.liquidity > 0,
+            "above-range deposit must produce positive liquidity"
+        );
         assert_eq!(result_a.dust, 0);
         assert_eq!(result_b.dust, 0);
     }
@@ -5255,27 +5368,25 @@ mod test_single_token_deposit {
         let env = Env::default();
         let (provider, token_a, _token_b, client) = setup_pool(&env, -200);
 
-        let r1 = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let r1 = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
-        let r2 = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &20_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let r2 = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &20_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         // Doubling the deposit should roughly double the liquidity (within rounding).
         assert!(
@@ -5296,16 +5407,15 @@ mod test_single_token_deposit {
         let env = Env::default();
         let (provider, token_a, _token_b, client) = setup_pool(&env, -200);
 
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         let events = env.events().all();
         let evt = events
@@ -5336,16 +5446,15 @@ mod test_single_token_deposit {
         // current_tick = 100, range [100, 200] - price at lower boundary
         let (provider, token_a, _token_b, client) = setup_pool(&env, 100);
 
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         // Token A at lower boundary should still produce liquidity
         assert!(result.liquidity > 0);
@@ -5363,16 +5472,15 @@ mod test_single_token_deposit {
         // This is an in-range position; token_b covers [lower=-200, current=-101].
         let (provider, _token_a, token_b, client) = setup_pool(&env, -101);
 
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &-200_i32,
-                &-100_i32,
-                &token_b,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &-200_i32,
+            &-100_i32,
+            &token_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert!(result.liquidity > 0);
         assert!(result.amount_used > 0);
@@ -5385,16 +5493,15 @@ mod test_single_token_deposit {
         // current_tick = 0, range [-1000, 1000] - wide range centered at current
         let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
 
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &-1000_i32,
-                &1000_i32,
-                &token_a,
-                &100_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &-1000_i32,
+            &1000_i32,
+            &token_a,
+            &100_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         // Token A covers upper half of the range
         assert!(result.liquidity > 0);
@@ -5409,16 +5516,15 @@ mod test_single_token_deposit {
         // current_tick = 0, range [-1, 1] - very tight range around current
         let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
 
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &-1_i32,
-                &1_i32,
-                &token_a,
-                &1_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &-1_i32,
+            &1_i32,
+            &token_a,
+            &1_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert!(result.liquidity > 0);
         assert!(result.amount_used > 0);
@@ -5432,16 +5538,15 @@ mod test_single_token_deposit {
         let (provider, token_a, _token_b, client) = setup_pool(&env, -800000);
 
         // Deposit at a reasonable range above current
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &-700000_i32,
-                &-600000_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &-700000_i32,
+            &-600000_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         assert!(result.liquidity > 0);
     }
@@ -5453,52 +5558,47 @@ mod test_single_token_deposit {
 
         // Test below range
         let (provider_a, token_a, _token_b, client) = setup_pool(&env, -200);
-        let quote1 = client
-            .quote_single_token_deposit(&100_i32, &200_i32, &token_a, &10_000_i128);
-        let mint1 = client
-            .mint_position_single_token(
-                &provider_a,
-                &100_i32,
-                &200_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let quote1 = client.quote_single_token_deposit(&100_i32, &200_i32, &token_a, &10_000_i128);
+        let mint1 = client.mint_position_single_token(
+            &provider_a,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
         assert_eq!(quote1.liquidity, mint1.liquidity);
         assert_eq!(quote1.amount_used, mint1.amount_used);
 
         // Test above range
         let (provider_b, _token_a, token_b, client) = setup_pool(&env, 300);
-        let quote2 = client
-            .quote_single_token_deposit(&-200_i32, &-100_i32, &token_b, &10_000_i128);
-        let mint2 = client
-            .mint_position_single_token(
-                &provider_b,
-                &-200_i32,
-                &-100_i32,
-                &token_b,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let quote2 =
+            client.quote_single_token_deposit(&-200_i32, &-100_i32, &token_b, &10_000_i128);
+        let mint2 = client.mint_position_single_token(
+            &provider_b,
+            &-200_i32,
+            &-100_i32,
+            &token_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
         assert_eq!(quote2.liquidity, mint2.liquidity);
         assert_eq!(quote2.amount_used, mint2.amount_used);
 
         // Test in range
         let (provider_c, token_a, _token_b, client) = setup_pool(&env, 0);
-        let quote3 = client
-            .quote_single_token_deposit(&-50_i32, &50_i32, &token_a, &10_000_i128);
-        let mint3 = client
-            .mint_position_single_token(
-                &provider_c,
-                &-50_i32,
-                &50_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let quote3 = client.quote_single_token_deposit(&-50_i32, &50_i32, &token_a, &10_000_i128);
+        let mint3 = client.mint_position_single_token(
+            &provider_c,
+            &-50_i32,
+            &50_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
         assert_eq!(quote3.liquidity, mint3.liquidity);
         assert_eq!(quote3.amount_used, mint3.amount_used);
     }
@@ -5577,16 +5677,15 @@ mod test_single_token_deposit {
         StellarAssetClient::new(&env, &token_a).mint(&provider, &100_000_i128);
         StellarAssetClient::new(&env, &token_a).mint(&cl_addr, &100_000_i128);
 
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &-200_i32,
-                &-100_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &-200_i32,
+            &-100_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         let liq = result.liquidity;
         let (burn_a, burn_b) = client.burn_position(&provider, &-200_i32, &-100_i32, &liq);
@@ -5623,16 +5722,15 @@ mod test_single_token_deposit {
         StellarAssetClient::new(&env, &token_b).mint(&cl_addr, &100_000_i128);
 
         // Deposit token A in range [-100, 100]
-        let result = client
-            .mint_position_single_token(
-                &provider,
-                &-100_i32,
-                &100_i32,
-                &token_a,
-                &10_000_i128,
-                &1_i128,
-                &u64::MAX,
-            );
+        let result = client.mint_position_single_token(
+            &provider,
+            &-100_i32,
+            &100_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
 
         let liq = result.liquidity;
         let (burn_a, burn_b) = client.burn_position(&provider, &-100_i32, &100_i32, &liq);

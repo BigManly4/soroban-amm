@@ -147,9 +147,15 @@ impl LpToken {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or(AllowanceValue { amount: 0, live_until_ledger: 0 });
+            .unwrap_or(AllowanceValue {
+                amount: 0,
+                live_until_ledger: 0,
+            });
         if val.amount > 0 && env.ledger().sequence() > val.live_until_ledger {
-            AllowanceValue { amount: 0, live_until_ledger: 0 }
+            AllowanceValue {
+                amount: 0,
+                live_until_ledger: 0,
+            }
         } else {
             val
         }
@@ -178,11 +184,15 @@ impl LpToken {
         let allowance = Self::allowance(env.clone(), from.clone(), spender.clone());
         assert!(
             allowance.amount >= amount,
-            "insufficient allowance: available={}, requested={amount}", allowance.amount
+            "insufficient allowance: available={}, requested={amount}",
+            allowance.amount
         );
         env.storage().persistent().set(
             &DataKey::Allowance(from.clone(), spender),
-            &AllowanceValue { amount: allowance.amount - amount, live_until_ledger: allowance.live_until_ledger },
+            &AllowanceValue {
+                amount: allowance.amount - amount,
+                live_until_ledger: allowance.live_until_ledger,
+            },
         );
         Self::_transfer(&env, &from, &to, amount);
     }
@@ -192,7 +202,13 @@ impl LpToken {
     /// Requires authorization from `from`.
     /// `live_until_ledger` must be >= current ledger sequence when `amount > 0`.
     /// Setting `amount` to `0` effectively revokes the allowance.
-    pub fn approve(env: Env, from: Address, spender: Address, amount: i128, live_until_ledger: u32) {
+    pub fn approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        live_until_ledger: u32,
+    ) {
         from.require_auth();
         if amount > 0 {
             assert!(
@@ -200,9 +216,13 @@ impl LpToken {
                 "live_until_ledger must be >= current ledger"
             );
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Allowance(from, spender), &AllowanceValue { amount, live_until_ledger });
+        env.storage().persistent().set(
+            &DataKey::Allowance(from, spender),
+            &AllowanceValue {
+                amount,
+                live_until_ledger,
+            },
+        );
     }
 
     /// Mint new tokens — admin only (called by the AMM contract).
@@ -530,7 +550,9 @@ mod tests {
         assert_eq!(client.allowance(&alice, &bob).amount, 300);
 
         // Advance past expiry
-        ts.env.ledger().with_mut(|l| l.sequence_number = live_until + 1);
+        ts.env
+            .ledger()
+            .with_mut(|l| l.sequence_number = live_until + 1);
         assert_eq!(client.allowance(&alice, &bob).amount, 0);
     }
 

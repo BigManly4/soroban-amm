@@ -232,7 +232,7 @@ pub fn get_amount0_delta(mut sqrt_a: u128, mut sqrt_b: u128, liquidity: i128) ->
     //         = abs_liq * (sqrt_b - sqrt_a) * 2^192 / (sqrt_b * sqrt_a)
     // Use wide arithmetic via splitting to stay in u128.
     let numerator = mul_u128_u96(abs_liq, sqrt_b - sqrt_a); // abs_liq * (sqrt_b - sqrt_a) * 2^96
-    // Compute sqrt_a * sqrt_b / Q96 without overflow using mul_shift128
+                                                            // Compute sqrt_a * sqrt_b / Q96 without overflow using mul_shift128
     let denominator = mul_shift128(sqrt_a, sqrt_b).wrapping_shl(32);
     let abs_result = if denominator == 0 {
         0
@@ -348,16 +348,17 @@ mod tests {
     fn tick_max_is_clamped() {
         let sp = tick_to_sqrt_price_x96(MAX_TICK);
         // The u128 implementation clamps to valid range; just verify it's ≥ MIN_SQRT_PRICE.
-        assert!(sp >= MIN_SQRT_PRICE, "MAX_TICK must yield at least MIN_SQRT_PRICE");
+        assert!(
+            sp >= MIN_SQRT_PRICE,
+            "MAX_TICK must yield at least MIN_SQRT_PRICE"
+        );
     }
 
     #[test]
     fn round_trip_tick_to_sqrt_and_back() {
         // Both signs round-trip now that positive ticks are derived from the
         // exact negative side via the 2^192 / sqrt_price(-t) identity (#347).
-        for tick in [
-            -100_000_i32, -10_000, -100, -1, 1, 100, 10_000, 100_000,
-        ] {
+        for tick in [-100_000_i32, -10_000, -100, -1, 1, 100, 10_000, 100_000] {
             let sp = tick_to_sqrt_price_x96(tick);
             let back = sqrt_price_x96_to_tick(sp);
             assert_eq!(back, tick, "round-trip failed for tick {tick}: got {back}");

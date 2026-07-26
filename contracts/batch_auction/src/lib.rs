@@ -969,7 +969,15 @@ mod tests {
             &1_000_000_000_i128,
             &u64::MAX,
         );
-        client.submit_order(&good_trader, &pool, &ta, &tb, &5_000_i128, &0_i128, &u64::MAX);
+        client.submit_order(
+            &good_trader,
+            &pool,
+            &ta,
+            &tb,
+            &5_000_i128,
+            &0_i128,
+            &u64::MAX,
+        );
 
         env.ledger().set_timestamp(1031);
 

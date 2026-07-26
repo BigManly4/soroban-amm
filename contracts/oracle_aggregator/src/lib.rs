@@ -14,8 +14,8 @@
 //! [`OracleAggregator::set_max_deviation_bps`].
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype,
-    panic_with_error, symbol_short, Address, Env, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, Env, Vec,
 };
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -190,7 +190,10 @@ impl OracleAggregator {
         let sources = read_sources(env);
 
         if sources.len() == 0 {
-            return AggregatedPrice { price: 0, confidence: 0 };
+            return AggregatedPrice {
+                price: 0,
+                confidence: 0,
+            };
         }
 
         let now = env.ledger().timestamp();
@@ -240,7 +243,10 @@ impl OracleAggregator {
         }
 
         if prices.len() < MIN_VALID_SOURCES {
-            return AggregatedPrice { price: 0, confidence: 0 };
+            return AggregatedPrice {
+                price: 0,
+                confidence: 0,
+            };
         }
 
         if persist_sources {
@@ -274,7 +280,10 @@ impl OracleAggregator {
         // Too few sources agree — a high-variance quote set. Report no
         // confidence rather than a price that only looks corroborated.
         if agreeing.len() < MIN_VALID_SOURCES {
-            return AggregatedPrice { price: 0, confidence: 0 };
+            return AggregatedPrice {
+                price: 0,
+                confidence: 0,
+            };
         }
 
         // Report the median of the agreeing subset so a dropped outlier does
