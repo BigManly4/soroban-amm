@@ -26,6 +26,11 @@ pub enum DataKey {
     TotalSupply,
     Checkpoints(Address),
     PendingAdmin,
+    /// Set to `true` once an account's checkpoint history has been truncated by
+    /// the `MAX_CHECKPOINTS` eviction. Lets `balance_at` distinguish a genuine
+    /// pre-history zero balance from a queried ledger whose covering checkpoint
+    /// has been evicted.
+    CheckpointsTruncated(Address),
 }
 
 #[contracttype]
@@ -105,8 +110,14 @@ impl LpToken {
     }
 
     /// Returns the account balance at or before `ledger`.
+    ///
+    /// Panics if `ledger` predates the oldest retained checkpoint *and* the
+    /// account's history has been truncated by `MAX_CHECKPOINTS` eviction: the
+    /// true balance at that ledger is no longer recoverable, so erroring is
+    /// preferred over silently returning an incorrect (possibly zero) value
+    /// that would corrupt governance snapshots.
     pub fn balance_at(env: Env, id: Address, ledger: u32) -> i128 {
-        let key = DataKey::Checkpoints(id);
+        let key = DataKey::Checkpoints(id.clone());
         let checkpoints: Vec<Checkpoint> = env
             .storage()
             .persistent()
@@ -119,6 +130,17 @@ impl LpToken {
         env.storage()
             .persistent()
             .extend_ttl(&key, Self::MIN_TTL, Self::BUMP_TO);
+
+        // Keep the truncation flag's TTL in lockstep with the checkpoints it
+        // guards. If it were allowed to expire while checkpoints survive, a
+        // pre-window query would silently return 0 again — the exact bug.
+        let trunc_key = DataKey::CheckpointsTruncated(id);
+        let truncated: bool = env.storage().persistent().get(&trunc_key).unwrap_or(false);
+        if truncated {
+            env.storage()
+                .persistent()
+                .extend_ttl(&trunc_key, Self::MIN_TTL, Self::BUMP_TO);
+        }
 
         let mut low = 0;
         let mut high = len;
@@ -133,6 +155,16 @@ impl LpToken {
         }
 
         if low == 0 {
+            // The queried ledger precedes every surviving checkpoint. If this
+            // account's history was truncated, the checkpoint that actually
+            // covered `ledger` may have been evicted — we cannot honestly
+            // answer, so error instead of returning a bogus 0.
+            if truncated {
+                panic!(
+                    "balance_at: ledger {ledger} predates retained checkpoint history \
+                     (evicted at MAX_CHECKPOINTS); balance unavailable"
+                );
+            }
             0
         } else {
             checkpoints.get(low - 1).unwrap().balance
@@ -412,6 +444,21 @@ impl LpToken {
 
         if checkpoints.len() >= Self::MAX_CHECKPOINTS {
             checkpoints.remove(0);
+            // Record that the oldest history has been dropped so `balance_at`
+            // errors on queries it can no longer answer accurately rather than
+            // silently returning a wrong balance. A truncated account stays at
+            // MAX_CHECKPOINTS forever, so every later distinct-ledger write
+            // re-enters this branch; extending the flag's TTL here (together
+            // with `balance_at` doing the same on reads) keeps it alive in
+            // lockstep with the checkpoints it guards, without adding any cost
+            // to the common, non-truncated write path.
+            let trunc_key = DataKey::CheckpointsTruncated(account.clone());
+            if !env.storage().persistent().has(&trunc_key) {
+                env.storage().persistent().set(&trunc_key, &true);
+            }
+            env.storage()
+                .persistent()
+                .extend_ttl(&trunc_key, Self::MIN_TTL, Self::BUMP_TO);
         }
         checkpoints.push_back(Checkpoint { ledger, balance });
         env.storage().persistent().set(&key, &checkpoints);
@@ -625,6 +672,69 @@ mod tests {
         assert_eq!(client.balance_at(&alice, &30_u32), 650);
         assert_eq!(client.balance_at(&bob, &19_u32), 0);
         assert_eq!(client.balance_at(&bob, &20_u32), 250);
+    }
+
+    /// Mints an early balance for a fresh account, then generates enough
+    /// distinct-ledger balance changes to overflow `MAX_CHECKPOINTS`, evicting
+    /// the earliest checkpoint. The early checkpoint is written at ledger 100.
+    fn mint_until_truncated(ts: &TestSetup) -> Address {
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+
+        ts.env.ledger().set_sequence_number(100);
+        client.mint(&alice, &1_000_i128);
+
+        // One checkpoint already exists (ledger 100). Pushing MAX_CHECKPOINTS
+        // more at distinct increasing ledgers forces at least one eviction,
+        // dropping the ledger-100 checkpoint.
+        let start = 101u32;
+        for i in 0..LpToken::MAX_CHECKPOINTS {
+            ts.env.ledger().set_sequence_number(start + i);
+            client.mint(&alice, &1_i128);
+        }
+        alice
+    }
+
+    #[test]
+    fn test_balance_at_errors_when_history_truncated() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = mint_until_truncated(&ts);
+
+        // The checkpoint recording alice's balance at ledger 100 has been
+        // evicted. Querying it must error instead of silently returning 0,
+        // which would zero out her governance snapshot voting power.
+        assert!(client.try_balance_at(&alice, &100_u32).is_err());
+    }
+
+    #[test]
+    fn test_balance_at_within_window_ok_after_truncation() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = mint_until_truncated(&ts);
+
+        // Ledgers still covered by surviving checkpoints resolve correctly:
+        // eviction only drops the front, so the retained tail stays accurate.
+        // Ledger 101 was the first loop mint (1_000 + 1 = 1_001).
+        assert_eq!(client.balance_at(&alice, &101_u32), 1_001);
+        // Final checkpoint: 1_000 + MAX_CHECKPOINTS increments of 1.
+        let last_ledger = 101 + LpToken::MAX_CHECKPOINTS - 1;
+        assert_eq!(
+            client.balance_at(&alice, &last_ledger),
+            1_000 + LpToken::MAX_CHECKPOINTS as i128
+        );
+    }
+
+    #[test]
+    fn test_balance_at_pre_history_zero_not_truncated() {
+        // Without truncation, a query before the first checkpoint is a genuine
+        // zero and must not panic.
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        ts.env.ledger().set_sequence_number(50);
+        client.mint(&alice, &1_000_i128);
+        assert_eq!(client.balance_at(&alice, &49_u32), 0);
     }
 
     #[test]
