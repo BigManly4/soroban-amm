@@ -1,17 +1,35 @@
 //! Fuzz / property-based tests for AMM swap invariants.
 //!
-//! Verifies that:
+//! This crate contains **two complementary suites**:
+//!
+//! ## 1. Pure-formula suite (fast, no Soroban environment)
+//!
+//! The top-level `proptest!` block and the `regression` module verify the
+//! constant-product formula helpers (`cp_amount_out`, `fee_amount`,
+//! `SimPool`) in isolation. These run tens of thousands of cases cheaply
+//! because they never touch an actual contract.
+//!
+//! Verifies:
 //!   1. The x*y=k invariant holds (k never decreases) after every swap.
 //!   2. Fee calculations are correct across all valid fee tiers (0–10 000 bps).
 //!   3. No integer overflow or rounding error causes incorrect output.
 //!   4. The constant-product output formula never returns a value ≥ reserve_out.
 //!
+//! ## 2. Deployed-contract suite (`contract_props` module)
+//!
+//! The `contract_props` module deploys the **real** `amm.wasm` and
+//! `token.wasm` binaries (via `soroban_sdk::contractimport!`) into a
+//! Soroban test environment and drives `Pool::client` directly.  It
+//! verifies the same invariants against the on-chain code so that
+//! defects in the actual contract logic (e.g. in `swap`, `add_liquidity`,
+//! or `swap_fot`) are caught here even if the pure-formula suite passes.
+//!
 //! Run with:
 //!   cargo test -p amm-fuzz
 //!
-//! Each proptest property runs with 10 000 cases by default (see ProptestConfig).
-
-#![allow(dead_code)]
+//! Each proptest property runs with 256 cases by default in the
+//! deployed-contract suite (Soroban environments are heavier to spin up)
+//! and 10 000 cases in the pure-formula suite.
 
 extern crate std;
 
@@ -133,13 +151,13 @@ impl SimPool {
 
 mod amm_wasm {
     soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/amm.wasm"
+        file = "../../target/wasm32v1-none/release/amm.wasm"
     );
 }
 
 mod token_wasm {
     soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/token.wasm"
+        file = "../../target/wasm32v1-none/release/token.wasm"
     );
 }
 
@@ -452,6 +470,237 @@ proptest! {
             amount_in_reverse <= amount_in + 2,
             "inverse quote {amount_in_reverse} deviates by more than 2 from original {amount_in}"
         );
+    }
+}
+
+// ── Deployed-contract property tests ─────────────────────────────────────────
+
+/// Property tests that exercise the **real** deployed `amm.wasm` contract.
+///
+/// Every property in this module spins up a Soroban test environment,
+/// deploys the AMM and token contracts via `contractimport!`, and drives the
+/// `Pool` client so that defects in the actual on-chain code are caught here.
+///
+/// The case count is kept at 256 (instead of 10 000) because each case
+/// requires a full Soroban environment setup; this is still enough coverage
+/// to surface logic bugs while keeping CI time reasonable.
+///
+/// # Reserve measurement
+///
+/// Rather than calling `get_info()` (which returns a custom `PoolInfo` struct
+/// that can collide with the SDK's own re-exported type), the tests read the
+/// pool contract's token balance directly from the SAC (`StellarTokenClient`).
+/// This gives the same reserve values through a simpler, always-stable API.
+#[cfg(test)]
+mod contract_props {
+    use super::*;
+    use soroban_sdk::token::TokenClient as StellarTokenClient;
+
+    /// Read the pool's current token-A and token-B balances (= reserves) using
+    /// the standard SEP-41 `balance` call on each SAC.  This avoids depending
+    /// on `get_info()` and the custom `PoolInfo` type.
+    fn pool_reserves<'a>(
+        env: &'a Env,
+        pool_addr: &soroban_sdk::Address,
+        ta: &soroban_sdk::Address,
+        tb: &soroban_sdk::Address,
+    ) -> (i128, i128) {
+        let ra = StellarTokenClient::new(env, ta).balance(pool_addr);
+        let rb = StellarTokenClient::new(env, tb).balance(pool_addr);
+        (ra, rb)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Contract property: k = reserve_a * reserve_b never decreases after
+        /// a swap against the real deployed AMM.
+        ///
+        /// This is the on-chain counterpart of `prop_k_never_decreases`. It
+        /// catches bugs in `swap` itself (fee accounting, reserve updates) that
+        /// the pure-formula suite cannot see.
+        #[test]
+        fn contract_prop_k_never_decreases_after_swap(
+            amount_in in 1_i128..=500_000_i128,
+            fee_bps   in 0_i128..=9_999_i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let pool = deploy_pool(&env, fee_bps);
+            let pool_addr = pool.client.address.clone();
+
+            // Mint tokens for a trader.
+            let trader = Address::generate(&env);
+            soroban_sdk::token::StellarAssetClient::new(&env, &pool.ta)
+                .mint(&trader, &amount_in);
+
+            // Read reserves before the swap.
+            let (ra_before, rb_before) = pool_reserves(&env, &pool_addr, &pool.ta, &pool.tb);
+            let k_before = ra_before * rb_before;
+
+            // Execute swap A→B; use min_out=0 and a distant deadline.
+            pool.client.swap(
+                &trader,
+                &pool.ta,
+                &amount_in,
+                &0_i128,
+                &u64::MAX,
+            );
+
+            let (ra_after, rb_after) = pool_reserves(&env, &pool_addr, &pool.ta, &pool.tb);
+            let k_after = ra_after * rb_after;
+
+            prop_assert!(
+                k_after >= k_before,
+                "k decreased on real contract: before={k_before}, after={k_after} \
+                 (amount_in={amount_in}, fee_bps={fee_bps})"
+            );
+        }
+
+        /// Contract property: `get_amount_out` always returns a value strictly
+        /// less than `reserve_out` on the real deployed contract.
+        ///
+        /// Mirrors `prop_output_strictly_lt_reserve_out` but calls the
+        /// on-chain `get_amount_out` view so any discrepancy between the
+        /// pure-Rust mirror and the Soroban implementation is visible.
+        #[test]
+        fn contract_prop_get_amount_out_lt_reserve_out(
+            amount_in in 1_i128..=500_000_i128,
+            fee_bps   in 0_i128..=9_999_i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let pool = deploy_pool(&env, fee_bps);
+            let pool_addr = pool.client.address.clone();
+
+            let (_, reserve_out) = pool_reserves(&env, &pool_addr, &pool.ta, &pool.tb);
+
+            // get_amount_out is a pure view; AmmError return is handled via try_ variant.
+            let out = pool.client.try_get_amount_out(&pool.ta, &amount_in);
+            let out = match out {
+                Ok(Ok(v)) => v,
+                _ => return Ok(()), // EmptyPool or other non-invariant error; skip
+            };
+
+            prop_assert!(
+                out < reserve_out,
+                "get_amount_out {out} >= reserve_out {reserve_out} \
+                 (amount_in={amount_in}, fee_bps={fee_bps})"
+            );
+        }
+
+        /// Contract property: per-LP-share k is non-decreasing across a
+        /// sequence of `add_liquidity` + `swap` + `remove_liquidity` calls on
+        /// the real deployed contract.
+        ///
+        /// Encodes each operation as a `(u8, i128)` pair (same encoding as
+        /// `prop_per_share_k_non_decreasing_across_sequences`) so proptest can
+        /// shrink failures to a minimal reproduction.
+        #[test]
+        fn contract_prop_per_share_k_non_decreasing_across_sequences(
+            ops     in proptest::collection::vec(
+                (0u8..3u8, 1_i128..=100_000_i128),
+                1..16,
+            ),
+            fee_bps in 0_i128..=300_i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let pool = deploy_pool(&env, fee_bps);
+            let pool_addr = pool.client.address.clone();
+
+            // Provision a shared actor with enough tokens for all ops.
+            let actor = Address::generate(&env);
+            soroban_sdk::token::StellarAssetClient::new(&env, &pool.ta)
+                .mint(&actor, &100_000_000_i128);
+            soroban_sdk::token::StellarAssetClient::new(&env, &pool.tb)
+                .mint(&actor, &100_000_000_i128);
+
+            // Add an initial chunk so actor holds LP shares.
+            pool.client.add_liquidity(
+                &actor,
+                &500_000_i128,
+                &500_000_i128,
+                &0_i128,
+                &u64::MAX,
+            );
+
+            // Baseline: reserve_a * reserve_b / total_shares^2, tracked as
+            // cross-multiplied integers to avoid floating-point.
+            let lp_token_addr: soroban_sdk::Address = {
+                // Access the LP token address stored in the WASM client.
+                // We don't call get_info() — instead we read shares_of after
+                // the first add_liquidity.  We track total_shares by summing
+                // mints ourselves; for the invariant test we only need
+                // relative comparisons, so we snapshot at baseline.
+                pool.client.address.clone() // placeholder; replaced below
+            };
+            let _ = lp_token_addr; // not needed; we compute via token balances
+
+            let (ra0, rb0) = pool_reserves(&env, &pool_addr, &pool.ta, &pool.tb);
+            let actor_shares0 = pool.client.shares_of(&actor);
+            if actor_shares0 <= 0 || ra0 <= 0 || rb0 <= 0 {
+                return Ok(());
+            }
+            // baseline: ra0 * rb0 / actor_shares0^2 (in cross-multiply form)
+            let k0 = ra0 * rb0;
+            let s0 = actor_shares0;
+
+            for (kind, amount) in ops {
+                match kind {
+                    0 => {
+                        // add_liquidity — ratio-matched deposit
+                        let _ = pool.client.try_add_liquidity(
+                            &actor, &amount, &amount, &0_i128, &u64::MAX,
+                        );
+                    }
+                    1 => {
+                        // swap A→B
+                        soroban_sdk::token::StellarAssetClient::new(&env, &pool.ta)
+                            .mint(&actor, &amount);
+                        let _ = pool.client.try_swap(
+                            &actor, &pool.ta, &amount, &0_i128, &u64::MAX,
+                        );
+                    }
+                    2 => {
+                        // remove_liquidity — burn a small slice of actor's shares
+                        let actor_shares = pool.client.shares_of(&actor);
+                        if actor_shares > 1 {
+                            let burn = amount.min(actor_shares - 1).max(1);
+                            let _ = pool.client.try_remove_liquidity(
+                                &actor, &burn, &0_i128, &0_i128, &u64::MAX,
+                            );
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+
+                let actor_shares_now = pool.client.shares_of(&actor);
+                if actor_shares_now <= 0 {
+                    continue;
+                }
+                let (ra_now, rb_now) = pool_reserves(&env, &pool_addr, &pool.ta, &pool.tb);
+                if ra_now <= 0 || rb_now <= 0 {
+                    continue;
+                }
+                // Invariant: ra_now * rb_now / actor_shares_now^2
+                //          >= ra0 * rb0 / actor_shares0^2
+                // Cross-multiply: (ra_now * rb_now) * s0^2
+                //              >= k0 * actor_shares_now^2
+                let lhs = ra_now.saturating_mul(rb_now).saturating_mul(s0.saturating_mul(s0));
+                let rhs = k0.saturating_mul(actor_shares_now.saturating_mul(actor_shares_now));
+                prop_assert!(
+                    lhs + 1 >= rhs,
+                    "per-share k regressed on real contract: \
+                     ra={ra_now}, rb={rb_now}, shares={actor_shares_now}, \
+                     k0={k0}, s0={s0}, \
+                     after op kind={kind} amount={amount}",
+                );
+            }
+        }
     }
 }
 

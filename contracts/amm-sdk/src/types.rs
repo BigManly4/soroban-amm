@@ -49,9 +49,15 @@ pub enum SdkAmmError {
 // ── Pool state ────────────────────────────────────────────────────────────────
 
 /// Full snapshot of an AMM pool's state returned by `get_info`.
+///
+/// This mirrors the on-chain `PoolInfo` struct. Named `SdkPoolInfo` to avoid a
+/// duplicate-type collision in the WASM spec when the AMM contract is compiled
+/// with this SDK crate as a dependency (both would otherwise emit a `PoolInfo`
+/// entry, causing `soroban_sdk::contractimport!` to fail with a redefinition
+/// error in consumer crates such as `amm-fuzz`).
 #[contracttype]
 #[derive(Debug, Clone, PartialEq)]
-pub struct PoolInfo {
+pub struct SdkPoolInfo {
     pub token_a: Address,
     pub token_b: Address,
     pub reserve_a: i128,
@@ -65,6 +71,10 @@ pub struct PoolInfo {
     /// Issue #292: fraction of protocol fee rebated back to LP reserves (bps).
     pub lp_rebate_bps: i128,
 }
+
+/// Backward-compatible type alias so existing SDK consumers do not need to
+/// change their code.
+pub type PoolInfo = SdkPoolInfo;
 
 // ── Quote types ───────────────────────────────────────────────────────────────
 
