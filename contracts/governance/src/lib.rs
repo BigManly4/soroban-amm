@@ -482,7 +482,8 @@ impl Governance {
     }
 
     /// Admin-only: update the timelock delay between vote end and execution.
-    /// A delay of 0 means execution is allowed immediately after the voting period ends.
+    /// Execution is always gated by at least the veto window (24h), so even
+    /// a delay of 0 does not allow execution before the veto window expires.
     pub fn set_timelock_delay(env: Env, new_delay: u64) -> Result<(), GovernanceError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -631,7 +632,7 @@ impl Governance {
 
         let now = env.ledger().timestamp();
         let vote_end = now + voting_period;
-        let execute_after = vote_end + timelock;
+        let execute_after = vote_end + timelock.max(VETO_WINDOW_SECS);
         // Execution window: at least one voting period even when timelock is 0.
         let expires_at = execute_after + timelock.max(voting_period);
 
@@ -2030,7 +2031,7 @@ mod tests {
     // ── Issue #188: set_timelock_delay ────────────────────────────────────────
 
     #[test]
-    fn test_timelock_delay_zero_allows_immediate_execution() {
+    fn test_timelock_delay_zero_respects_veto_window() {
         let s = setup_suite(30);
         let gov = GovernanceClient::new(&s.env, &s.gov_addr);
 
@@ -2039,7 +2040,7 @@ mod tests {
         mint_lp(&s, &lp1, 600);
         mint_lp(&s, &lp2, 400);
 
-        // Set timelock delay to 0 so execution is allowed immediately after vote_end.
+        // Set timelock delay to 0, but execute_after should still respect veto window.
         gov.set_timelock_delay(&0_u64);
         let params = gov.get_params();
         assert_eq!(params.timelock_secs, 0);
@@ -2049,8 +2050,8 @@ mod tests {
         gov.vote(&lp2, &pid, &Vote::For);
 
         let proposal = gov.get_proposal(&pid);
-        // With timelock = 0: execute_after = vote_end, expires_at = vote_end + voting_period.
-        // Jump to execute_after + 1 to satisfy now >= execute_after.
+        // With timelock = 0: execute_after = vote_end + VETO_WINDOW_SECS (clamped).
+        // Jump past the veto window.
         s.env.ledger().set_timestamp(proposal.execute_after + 1);
 
         gov.execute(&pid);
