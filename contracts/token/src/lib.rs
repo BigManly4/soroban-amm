@@ -434,7 +434,9 @@ impl LpToken {
                 last.balance = balance;
                 checkpoints.set(last_idx, last);
                 env.storage().persistent().set(&key, &checkpoints);
-                Self::bump_checkpoint_ttl(env, account);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, Self::MIN_TTL, Self::BUMP_TO);
                 return;
             }
         }
@@ -443,32 +445,25 @@ impl LpToken {
             checkpoints.remove(0);
             // Record that the oldest history has been dropped so `balance_at`
             // errors on queries it can no longer answer accurately rather than
-            // silently returning a wrong balance.
+            // silently returning a wrong balance. A truncated account stays at
+            // MAX_CHECKPOINTS forever, so every later distinct-ledger write
+            // re-enters this branch; extending the flag's TTL here (together
+            // with `balance_at` doing the same on reads) keeps it alive in
+            // lockstep with the checkpoints it guards, without adding any cost
+            // to the common, non-truncated write path.
             let trunc_key = DataKey::CheckpointsTruncated(account.clone());
             if !env.storage().persistent().has(&trunc_key) {
                 env.storage().persistent().set(&trunc_key, &true);
             }
-        }
-        checkpoints.push_back(Checkpoint { ledger, balance });
-        env.storage().persistent().set(&key, &checkpoints);
-        Self::bump_checkpoint_ttl(env, account);
-    }
-
-    /// Extends the TTL of an account's checkpoint list and, when present, its
-    /// truncation flag, keeping the two entries alive together so `balance_at`
-    /// never sees checkpoints without the flag that guards them.
-    fn bump_checkpoint_ttl(env: &Env, account: &Address) {
-        env.storage().persistent().extend_ttl(
-            &DataKey::Checkpoints(account.clone()),
-            Self::MIN_TTL,
-            Self::BUMP_TO,
-        );
-        let trunc_key = DataKey::CheckpointsTruncated(account.clone());
-        if env.storage().persistent().has(&trunc_key) {
             env.storage()
                 .persistent()
                 .extend_ttl(&trunc_key, Self::MIN_TTL, Self::BUMP_TO);
         }
+        checkpoints.push_back(Checkpoint { ledger, balance });
+        env.storage().persistent().set(&key, &checkpoints);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, Self::MIN_TTL, Self::BUMP_TO);
     }
 }
 
