@@ -9,6 +9,9 @@ use soroban_sdk::{
 use amm::{AmmPoolClient, PoolInfo};
 use factory::FactoryClient;
 
+const MIN_TTL: u32 = 172_800;
+const BUMP_TO: u32 = 518_400;
+
 #[contractclient(name = "ClPoolClient")]
 pub trait ClPoolInterface {
     fn estimate_price_impact(
@@ -125,6 +128,7 @@ impl DexAggregator {
         token_b: Address,
         fee_bps: i128,
     ) {
+        Self::extend_ttl(&env);
         let mut cl_pools: Vec<ClPoolInfo> = env
             .storage()
             .instance()
@@ -155,6 +159,7 @@ impl DexAggregator {
         amount_in: i128,
         max_hops: u32,
     ) -> Result<RouteQuote, AggregatorError> {
+        Self::extend_ttl(&env);
         assert!(token_in != token_out, "same token");
         assert!(amount_in > 0, "amount must be positive");
         let cap = max_hops.min(Self::DEFAULT_MAX_HOPS);
@@ -184,6 +189,7 @@ impl DexAggregator {
         min_out: i128,
         deadline: u64,
     ) -> Result<i128, AggregatorError> {
+        Self::extend_ttl(&env);
         trader.require_auth();
         if route.hops.is_empty() || route.amount_out < min_out {
             return Err(AggregatorError::SlippageExceeded);
@@ -202,6 +208,7 @@ impl DexAggregator {
         amount_in: i128,
         min_out: i128,
     ) -> Result<i128, AggregatorError> {
+        Self::extend_ttl(&env);
         let max_hops: u32 = env
             .storage()
             .instance()
@@ -219,6 +226,7 @@ impl DexAggregator {
         amount_in: i128,
         quoted_out: i128,
     ) -> bool {
+        Self::extend_ttl(&env);
         let max_hops: u32 = env
             .storage()
             .instance()
@@ -520,6 +528,10 @@ impl DexAggregator {
             }
         }
         vec.push_back(addr);
+    }
+
+    fn extend_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(MIN_TTL, BUMP_TO);
     }
 }
 
