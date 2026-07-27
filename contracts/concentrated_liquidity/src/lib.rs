@@ -2563,7 +2563,12 @@ impl ConcentratedLiquidity {
             let sqrt_upper = Self::tick_to_sqrt_price_x96(ut);
             math::get_liquidity_for_amount1(sqrt_lower, sqrt_upper, b).max(1)
         } else {
-            a.min(b).max(1)
+            let sqrt_lower = Self::tick_to_sqrt_price_x96(lt);
+            let sqrt_upper = Self::tick_to_sqrt_price_x96(ut);
+            let sqrt_current = Self::tick_to_sqrt_price_x96(ct);
+            let liquidity_from_amount0 = math::get_liquidity_for_amount0(sqrt_current, sqrt_upper, a);
+            let liquidity_from_amount1 = math::get_liquidity_for_amount1(sqrt_lower, sqrt_current, b);
+            liquidity_from_amount0.min(liquidity_from_amount1).max(1)
         }
     }
 
