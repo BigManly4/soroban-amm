@@ -1186,6 +1186,19 @@ impl Factory {
                     continue;
                 }
 
+                // Guard: only AMM pools have a PoolTokens entry. CL pools (which
+                // use a different interface and don't implement set_protocol_fee)
+                // never have this key, so we skip them. This also handles any
+                // legacy CL pool addresses that may exist in PoolByIndex from
+                // before CL pools were given their own separate index.
+                let is_amm_pool = env
+                    .storage()
+                    .persistent()
+                    .has(&DataKey::PoolTokens(pool_addr.clone()));
+                if !is_amm_pool {
+                    continue;
+                }
+
                 AmmPoolClient::new(env, &pool_addr).set_protocol_fee(
                     admin,
                     &factory_addr,
