@@ -610,7 +610,10 @@ mod tests {
         let cb_triggered = events
             .iter()
             .any(|e| e.topics[0].to_string() == "circuit_break");
-        assert!(cb_triggered, "circuit-breaker-triggered event should be emitted");
+        assert!(
+            cb_triggered,
+            "circuit-breaker-triggered event should be emitted"
+        );
 
         // Verify circuit breaker state
         let config_after = amm.get_circuit_breaker_config();
@@ -620,7 +623,8 @@ mod tests {
         // Verify subsequent swaps are rejected with CircuitBreaker error
         let trader2 = Address::generate(&env);
         StellarAssetClient::new(&env, &token_a).mint(&trader2, &10_000_i128);
-        let blocked_swap = amm.try_swap(&trader2, &token_a, &10_000_i128, &1_i128, &DEADLINE, &None);
+        let blocked_swap =
+            amm.try_swap(&trader2, &token_a, &10_000_i128, &1_i128, &DEADLINE, &None);
         assert!(
             blocked_swap.is_err(),
             "swaps should be blocked while circuit breaker is tripped"
@@ -632,27 +636,34 @@ mod tests {
 
         // Call try_circuit_breaker_recovery and verify the pool resumes swapping
         let recovered = amm.try_circuit_breaker_recovery();
-        assert!(
-            recovered.unwrap(),
-            "recovery should succeed after cooldown"
-        );
+        assert!(recovered.unwrap(), "recovery should succeed after cooldown");
 
         // Verify circuit-breaker-recovered event was emitted
         let events = env.events().all();
         let cb_recovered = events
             .iter()
             .any(|e| e.topics[0].to_string() == "cb_recovered");
-        assert!(cb_recovered, "circuit-breaker-recovered event should be emitted");
+        assert!(
+            cb_recovered,
+            "circuit-breaker-recovered event should be emitted"
+        );
 
         // Verify circuit breaker is no longer tripped
         let config_recovered = amm.get_circuit_breaker_config();
-        assert!(!config_recovered.tripped, "circuit breaker should no longer be tripped");
-        assert_eq!(config_recovered.triggered_at, 0, "triggered_at should be reset");
+        assert!(
+            !config_recovered.tripped,
+            "circuit breaker should no longer be tripped"
+        );
+        assert_eq!(
+            config_recovered.triggered_at, 0,
+            "triggered_at should be reset"
+        );
 
         // Verify swaps work again after recovery
         let trader3 = Address::generate(&env);
         StellarAssetClient::new(&env, &token_a).mint(&trader3, &10_000_i128);
-        let recovered_swap = amm.try_swap(&trader3, &token_a, &10_000_i128, &1_i128, &DEADLINE, &None);
+        let recovered_swap =
+            amm.try_swap(&trader3, &token_a, &10_000_i128, &1_i128, &DEADLINE, &None);
         assert!(
             recovered_swap.is_ok(),
             "swaps should work after circuit breaker recovery"

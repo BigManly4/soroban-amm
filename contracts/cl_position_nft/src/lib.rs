@@ -25,11 +25,11 @@ pub const WASM: &[u8] = include_bytes!(concat!(
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum NftError {
     AlreadyInitialized = 1,
-    Unauthorized       = 2,
-    TokenNotFound      = 3,
+    Unauthorized = 2,
+    TokenNotFound = 3,
     NotOwnerOrApproved = 4,
-    InvalidReceiver    = 5,
-    InvalidTtlConfig   = 6,
+    InvalidReceiver = 5,
+    InvalidTtlConfig = 6,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ pub enum DataKey {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionMeta {
     /// The CL pool contract that owns this position.
-    pub pool:       Address,
+    pub pool: Address,
     /// Lower tick of the position range.
     pub lower_tick: i32,
     /// Upper tick of the position range.
@@ -343,25 +343,28 @@ impl ClPositionNft {
         env.storage().persistent().set(&approved_key, &approved);
         Self::bump_persistent(&env, &approved_key);
 
-        env.events()
-            .publish((soroban_sdk::Symbol::new(&env, "approve"), caller, approved), token_id);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "approve"), caller, approved),
+            token_id,
+        );
 
         Ok(())
     }
 
     /// Set operator approval for all tokens owned by `owner`.
-    pub fn set_approval_for_all(
-        env: Env,
-        owner: Address,
-        operator: Address,
-        approved: bool,
-    ) {
+    pub fn set_approval_for_all(env: Env, owner: Address, operator: Address, approved: bool) {
         owner.require_auth();
         let key = DataKey::OperatorApproval(owner.clone(), operator.clone());
         env.storage().persistent().set(&key, &approved);
         Self::bump_persistent(&env, &key);
-        env.events()
-            .publish((soroban_sdk::Symbol::new(&env, "approval_for_all"), owner, operator), approved);
+        env.events().publish(
+            (
+                soroban_sdk::Symbol::new(&env, "approval_for_all"),
+                owner,
+                operator,
+            ),
+            approved,
+        );
     }
 
     /// Check if `operator` is approved for all tokens of `owner`.
@@ -399,7 +402,9 @@ impl ClPositionNft {
         }
 
         let is_owner = caller == from;
-        let is_approved = Self::get_approved(env.clone(), token_id).map(|a| a == caller).unwrap_or(false);
+        let is_approved = Self::get_approved(env.clone(), token_id)
+            .map(|a| a == caller)
+            .unwrap_or(false);
         let is_operator = Self::is_approved_for_all(env.clone(), from.clone(), caller.clone());
 
         if !is_owner && !is_approved && !is_operator {
@@ -411,7 +416,9 @@ impl ClPositionNft {
         Self::bump_persistent(&env, &owner_key);
 
         // Clear Approved
-        env.storage().persistent().remove(&DataKey::Approved(token_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Approved(token_id));
 
         // Update from OwnedTokens
         let from_key = DataKey::OwnedTokens(from.clone());
@@ -438,8 +445,10 @@ impl ClPositionNft {
         Self::bump_persistent(&env, &to_key);
 
         // Emit transfer event
-        env.events()
-            .publish((soroban_sdk::Symbol::new(&env, "transfer"), from, to), token_id);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "transfer"), from, to),
+            token_id,
+        );
 
         Ok(())
     }
@@ -720,7 +729,10 @@ mod tests {
 
         // Count matches the length of the full token list.
         assert_eq!(client.balance_of(&user), 3_u64);
-        assert_eq!(client.balance_of(&user), client.tokens_of(&user).len() as u64);
+        assert_eq!(
+            client.balance_of(&user),
+            client.tokens_of(&user).len() as u64
+        );
         assert_eq!(client.balance_of(&stranger), 0_u64);
     }
 
@@ -831,7 +843,10 @@ mod tests {
     #[test]
     fn set_ttl_params_rejects_bump_below_threshold() {
         let (_env, client, _admin, _pool, _) = setup();
-        let err = client.try_set_ttl_params(&900_000, &100_000).unwrap_err().unwrap();
+        let err = client
+            .try_set_ttl_params(&900_000, &100_000)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, NftError::InvalidTtlConfig);
     }
 

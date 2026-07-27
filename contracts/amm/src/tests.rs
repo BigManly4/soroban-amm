@@ -344,11 +344,7 @@ pub(crate) struct RemoveLiquidity<'a> {
 }
 
 impl<'a> RemoveLiquidity<'a> {
-    pub(crate) fn new(
-        amm: &'a AmmPoolClient<'a>,
-        provider: &'a Address,
-        shares: i128,
-    ) -> Self {
+    pub(crate) fn new(amm: &'a AmmPoolClient<'a>, provider: &'a Address, shares: i128) -> Self {
         Self {
             amm,
             provider,
@@ -457,19 +453,100 @@ fn test_set_protocol_fee_rejects_full_capture() {
 
     // protocol_fee_bps == fee_bps (30) must be rejected (M-02 fix).
     let result = amm.try_set_protocol_fee(&admin, &fee_recipient, &30_i128);
-    assert!(result.is_err(), "protocol_fee_bps == fee_bps must be rejected");
+    assert!(
+        result.is_err(),
+        "protocol_fee_bps == fee_bps must be rejected"
+    );
 
     // protocol_fee_bps > fee_bps must still be rejected.
     let result2 = amm.try_set_protocol_fee(&admin, &fee_recipient, &31_i128);
-    assert!(result2.is_err(), "protocol_fee_bps > fee_bps must be rejected");
+    assert!(
+        result2.is_err(),
+        "protocol_fee_bps > fee_bps must be rejected"
+    );
 
     // A valid strict value (29) must still be accepted.
     let result3 = amm.try_set_protocol_fee(&admin, &fee_recipient, &29_i128);
-    assert!(result3.is_ok(), "protocol_fee_bps < fee_bps must be accepted");
+    assert!(
+        result3.is_ok(),
+        "protocol_fee_bps < fee_bps must be accepted"
+    );
 
     // Zero protocol fee must always be accepted regardless of fee_bps.
     let result4 = amm.try_set_protocol_fee(&admin, &fee_recipient, &0_i128);
-    assert!(result4.is_ok(), "protocol_fee_bps == 0 must always be accepted");
+    assert!(
+        result4.is_ok(),
+        "protocol_fee_bps == 0 must always be accepted"
+    );
+}
+
+/// update_fee must reject values equal to or below protocol_fee_bps,
+/// matching set_protocol_fee's strict-less-than invariant.
+#[test]
+fn test_update_fee_rejects_equal_or_below_protocol_fee() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let fee_recipient = Address::generate(&env);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    // fee_bps = 30, protocol_fee = 10
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &fee_recipient,
+        &10_i128,
+    );
+
+    // Values above protocol_fee_bps (10) are valid.
+    let ok = amm.try_update_fee(&11_i128);
+    assert!(ok.is_ok(), "fee_bps > protocol_fee_bps must be accepted");
+    assert_eq!(amm.get_fee_bps(), 11);
+
+    // Re-set to 30 for the next checks.
+    amm.update_fee(&30_i128);
+
+    // Equal to protocol_fee_bps (10) must be rejected (the bug fix).
+    let result = amm.try_update_fee(&10_i128);
+    assert!(
+        result.is_err(),
+        "fee_bps == protocol_fee_bps must be rejected"
+    );
+
+    // Below protocol_fee_bps must be rejected.
+    let result2 = amm.try_update_fee(&9_i128);
+    assert!(
+        result2.is_err(),
+        "fee_bps < protocol_fee_bps must be rejected"
+    );
+}
+
+/// When protocol_fee is 0 (disabled), update_fee with any valid fee succeeds.
+#[test]
+fn test_update_fee_works_with_zero_protocol_fee() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let fee_recipient = Address::generate(&env);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    // fee_bps = 30, protocol_fee = 0 (disabled)
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &fee_recipient,
+        &0_i128,
+    );
+
+    // Both zero is valid.
+    assert!(amm.try_update_fee(&0_i128).is_ok(), "fee_bps=0 with protocol_fee=0 must be accepted");
+
+    // Setting fee to any valid value when protocol is disabled is fine.
+    assert!(amm.try_update_fee(&50_i128).is_ok(), "fee_bps=50 with protocol_fee=0 must be accepted");
 }
 
 #[test]
@@ -708,8 +785,8 @@ fn test_swap_exact_out_normal_path() {
     let trader = Address::generate(env);
     ta_sac.mint(&trader, &(required_in + 1_000));
 
-    let spent = SwapExactOut::new(&amm, &trader, &ts.tb_addr, want_out, required_in + 1_000)
-        .execute();
+    let spent =
+        SwapExactOut::new(&amm, &trader, &ts.tb_addr, want_out, required_in + 1_000).execute();
 
     assert_eq!(spent, required_in);
     let info = amm.get_info();
@@ -1056,8 +1133,7 @@ fn test_swap_emits_token_out_in_event_payload() {
     let swap_event = events
         .iter()
         .find(|e| {
-            e.0 == amm.address
-                && e.1 == (Symbol::new(env, "swap"), trader.clone()).into_val(env)
+            e.0 == amm.address && e.1 == (Symbol::new(env, "swap"), trader.clone()).into_val(env)
         })
         .expect("swap event not found");
 
@@ -1071,6 +1147,34 @@ fn test_swap_emits_token_out_in_event_payload() {
         amount_out,
     );
     assert_eq!(data, expected);
+}
+
+#[test]
+fn test_snapshot_position_records_pool_state() {
+    let ts = setup_pool(30);
+    let env = &ts.env;
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &1_000_000_i128);
+    tb_sac.mint(&provider, &1_000_000_i128);
+    AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
+
+    let snapshots = amm.get_snapshots();
+    assert_eq!(snapshots.len(), 0);
+
+    amm.snapshot_position();
+
+    let snapshots = amm.get_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    let snapshot = snapshots.get(0).unwrap();
+    assert_eq!(snapshot.reserve_a, 1_000_000);
+    assert_eq!(snapshot.reserve_b, 1_000_000);
+    assert_eq!(snapshot.total_shares, 1_000_000);
+    assert_eq!(snapshot.price_range_low, 900_000);
+    assert_eq!(snapshot.price_range_high, 1_100_000);
 }
 
 #[test]
@@ -1533,13 +1637,8 @@ fn test_remove_liquidity_one_sided() {
 
     // Remove one-sided: provider wants only token_a.
     // min_out = 1_000_000 ensures at least the proportional withdrawal.
-    let total_out = amm.remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &1_000_000_i128,
-        &u64::MAX,
-    );
+    let total_out =
+        amm.remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &1_000_000_i128, &u64::MAX);
 
     let ta_after = ta_client.balance(&provider);
     let tb_after = tb_client.balance(&provider);
@@ -1575,14 +1674,38 @@ fn test_remove_liquidity_one_sided_slippage_fails() {
     let shares = AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
 
     // min_out set impossibly high — must fail.
-    let result = amm.try_remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &i128::MAX,
-        &u64::MAX,
-    );
+    let result =
+        amm.try_remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &i128::MAX, &u64::MAX);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_remove_liquidity_one_sided_circuit_breaker() {
+    let ts = setup_pool(30);
+    let env = &ts.env;
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+
+    // Set circuit breaker threshold to 100 bps (1%) and cooldown to 600 seconds.
+    amm.set_circuit_breaker_config(&100_i128, &600_u64);
+
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &10_000_000_i128);
+    tb_sac.mint(&provider, &10_000_000_i128);
+    let shares = AddLiquidity::new(&amm, &provider, 10_000_000, 10_000_000).execute();
+
+    // Cause a price movement in the same ledger sequence using swap.
+    let trader = Address::generate(env);
+    ta_sac.mint(&trader, &5_000_000_i128);
+    Swap::new(&amm, &trader, &ts.ta_addr, 5_000_000).execute();
+
+    // Now attempting a large remove_liquidity_one_sided in the same ledger sequence will trip circuit breaker.
+    let res =
+        amm.try_remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &1_i128, &u64::MAX);
+    assert!(res.is_err());
 }
 
 #[test]
@@ -1631,4 +1754,171 @@ fn bench_add_liquidity_cost() {
     AddLiquidity::new(&amm, &provider, 500_000, 500_000).execute();
     std::println!("=== ADD_LIQ BUDGET ===");
     std::println!("{}", env.budget());
+}
+
+// ── add_liquidity_fot minimum-liquidity lock ─────────────────────────────────
+
+/// First deposit via add_liquidity_fot must lock MINIMUM_LIQUIDITY shares
+/// to the contract, matching add_liquidity's behavior (Issue #294).
+#[test]
+fn test_fot_first_deposit_locks_minimum_liquidity() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &admin,
+        &0_i128,
+    );
+
+    let provider = Address::generate(&env);
+    let ta_sac = StellarAssetClient::new(&env, &ta.address);
+    let tb_sac = StellarAssetClient::new(&env, &tb.address);
+    ta_sac.mint(&provider, &2_000_000);
+    tb_sac.mint(&provider, &2_000_000);
+
+    // First FOT deposit: amount_a=2_000_000, amount_b=2_000_000.
+    // sqrt(2_000_000 * 2_000_000) = 2_000_000 shares.
+    // After MINIMUM_LIQUIDITY lock, provider gets 2_000_000 - 1_000 = 1_999_000.
+    let shares = amm
+        .try_add_liquidity_fot(
+            &provider,
+            &2_000_000,
+            &2_000_000,
+            &0,
+            &0,
+            &0,
+            &u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(shares, 1_999_000);
+
+    let info = amm.get_info();
+    // Total shares = provider shares + locked 1_000.
+    assert_eq!(info.total_shares, 2_000_000);
+    // Locked 1_000 are held by the contract.
+    let lp_client = token::LpTokenClient::new(&env, &lp_addr);
+    assert_eq!(lp_client.balance(&amm_addr), 1_000);
+    assert_eq!(lp_client.balance(&provider), 1_999_000);
+}
+
+/// First deposit where shares <= MINIMUM_LIQUIDITY must be rejected.
+#[test]
+fn test_fot_first_deposit_rejects_insufficient_shares() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &admin,
+        &0_i128,
+    );
+
+    let provider = Address::generate(&env);
+    let ta_sac = StellarAssetClient::new(&env, &ta.address);
+    let tb_sac = StellarAssetClient::new(&env, &tb.address);
+    // sqrt(1_000 * 1_000) = 1_000 shares → equal to MINIMUM_LIQUIDITY → rejected.
+    ta_sac.mint(&provider, &1_000);
+    tb_sac.mint(&provider, &1_000);
+    let result = amm.try_add_liquidity_fot(
+        &provider,
+        &1_000,
+        &1_000,
+        &0,
+        &0,
+        &0,
+        &u64::MAX,
+    );
+    assert_eq!(result, Err(Ok(AmmError::InsufficientShares)));
+
+    // Even smaller: sqrt(500 * 500) = 500 → rejected.
+    let provider2 = Address::generate(&env);
+    ta_sac.mint(&provider2, &500);
+    tb_sac.mint(&provider2, &500);
+    let result2 = amm.try_add_liquidity_fot(
+        &provider2,
+        &500,
+        &500,
+        &0,
+        &0,
+        &0,
+        &u64::MAX,
+    );
+    assert_eq!(result2, Err(Ok(AmmError::InsufficientShares)));
+}
+
+/// Subsequent deposits via add_liquidity_fot must not lock additional liquidity.
+#[test]
+fn test_fot_subsequent_deposit_no_extra_lock() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &admin,
+        &0_i128,
+    );
+
+    let provider = Address::generate(&env);
+    let ta_sac = StellarAssetClient::new(&env, &ta.address);
+    let tb_sac = StellarAssetClient::new(&env, &tb.address);
+    ta_sac.mint(&provider, &2_000_000);
+    tb_sac.mint(&provider, &2_000_000);
+
+    // First deposit locks MINIMUM_LIQUIDITY.
+    let shares1 = amm
+        .try_add_liquidity_fot(
+            &provider,
+            &2_000_000,
+            &2_000_000,
+            &0,
+            &0,
+            &0,
+            &u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(shares1, 1_999_000);
+
+    // Second deposit: proportional, no additional lock.
+    ta_sac.mint(&provider, &1_000_000);
+    tb_sac.mint(&provider, &1_000_000);
+    let shares2 = amm
+        .try_add_liquidity_fot(
+            &provider,
+            &1_000_000,
+            &1_000_000,
+            &0,
+            &0,
+            &0,
+            &u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+
+    let info = amm.get_info();
+    let lp_client = token::LpTokenClient::new(&env, &lp_addr);
+
+    // Contract still holds exactly 1_000 locked shares.
+    assert_eq!(lp_client.balance(&amm_addr), 1_000);
+    // Provider's total balance = 1_999_000 + second deposit shares.
+    assert_eq!(lp_client.balance(&provider), shares1 + shares2);
+    // Total shares = provider total + 1_000 lock.
+    assert_eq!(info.total_shares, shares1 + shares2 + 1_000);
 }
