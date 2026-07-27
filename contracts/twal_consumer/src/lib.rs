@@ -105,7 +105,7 @@ impl TwalConsumer {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(env));
-        if timestamps.last().map_or(true, |last| last != ts) {
+        if timestamps.last() != Some(ts) {
             timestamps.push_back(ts);
         }
         env.storage().persistent().set(&key, &timestamps);

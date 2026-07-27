@@ -156,7 +156,7 @@ impl TwapConsumer {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(env));
-        if timestamps.last().map_or(true, |last| last != ts) {
+        if timestamps.last() != Some(ts) {
             timestamps.push_back(ts);
         }
         env.storage().persistent().set(&key, &timestamps);
@@ -374,7 +374,7 @@ impl TwapConsumer {
         if elapsed_pool <= 0 {
             return Err(TwapError::ElapsedZero);
         }
-        Ok(((cum_now - cum_then) / elapsed_pool) as i64)
+        Ok((cum_now - cum_then) / elapsed_pool)
     }
 
     pub fn save_cl_snapshot(env: Env, pool: Address) -> Result<(), TwapError> {

@@ -80,6 +80,7 @@ pub struct V2PoolInfo {
 pub trait V3PoolInterface {
     /// Add liquidity within a price range [tick_lower, tick_upper].
     /// Returns the LP NFT position ID minted to `provider`.
+    #[allow(clippy::too_many_arguments)]
     fn add_liquidity_range(
         env: Env,
         provider: Address,

@@ -540,6 +540,7 @@ impl ConcentratedLiquidity {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_position(
         env: Env,
         provider: Address,
@@ -691,6 +692,7 @@ impl ConcentratedLiquidity {
     /// [`ClError::DeadlineExpired`] once the ledger time has passed it. The
     /// `min_a` / `min_b` slippage guards alone cannot protect a transaction
     /// that sits in the mempool and later executes at a stale price.
+    #[allow(clippy::too_many_arguments)]
     pub fn modify_position(
         env: Env,
         provider: Address,
@@ -1408,7 +1410,7 @@ impl ConcentratedLiquidity {
             Self::amounts_for_liquidity_to_burn(current_tick, lower_tick, upper_tick, liquidity);
         pos.liquidity -= liquidity;
         env.storage().persistent().set(&pos_key, &pos);
-        Self::bump_position(&env, &pos_key);
+        Self::bump_position(env, &pos_key);
         // Remove from position list when position is fully closed
         if pos.liquidity == 0 {
             let list_key = DataKey::PositionList(provider.clone());
@@ -1425,7 +1427,7 @@ impl ConcentratedLiquidity {
                 }
             }
             env.storage().persistent().set(&list_key, &new_list);
-            Self::bump_position(&env, &list_key);
+            Self::bump_position(env, &list_key);
         }
 
         let fg_a: i128 = env
@@ -1503,7 +1505,7 @@ impl ConcentratedLiquidity {
         pos.fee_growth_inside_a = fg_inside_a;
         pos.fee_growth_inside_b = fg_inside_b;
         env.storage().persistent().set(&pos_key, &pos);
-        Self::bump_position(&env, &pos_key);
+        Self::bump_position(env, &pos_key);
         let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
         let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
         if total_a > 0 {
@@ -2444,7 +2446,7 @@ impl ConcentratedLiquidity {
         if tick == 0 {
             return PRICE_SCALE;
         }
-        let abs_tick = tick.unsigned_abs() as u32;
+        let abs_tick = tick.unsigned_abs();
         let mut price = PRICE_SCALE;
         // base = TICK_BASE_NUM / TICK_BASE_DEN in PRICE_SCALE units = 1.0001 * 1_000_000
         let mut base = TICK_BASE_NUM;

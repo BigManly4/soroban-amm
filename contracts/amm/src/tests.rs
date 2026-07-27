@@ -1606,13 +1606,8 @@ fn test_remove_liquidity_one_sided_circuit_breaker() {
     Swap::new(&amm, &trader, &ts.ta_addr, 5_000_000).execute();
 
     // Now attempting a large remove_liquidity_one_sided in the same ledger sequence will trip circuit breaker.
-    let res = amm.try_remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &1_i128,
-        &u64::MAX,
-    );
+    let res =
+        amm.try_remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &1_i128, &u64::MAX);
     assert!(res.is_err());
 }
 

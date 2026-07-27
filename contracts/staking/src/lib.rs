@@ -149,6 +149,7 @@ impl Staking {
     }
 
     /// Initialize with configurable veToken boost parameters (#317).
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize_with_boost_config(
         env: Env,
         lp_token: Address,

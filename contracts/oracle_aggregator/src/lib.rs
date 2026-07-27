@@ -189,7 +189,7 @@ impl OracleAggregator {
     ) -> AggregatedPrice {
         let sources = read_sources(env);
 
-        if sources.len() == 0 {
+        if sources.is_empty() {
             return AggregatedPrice {
                 price: 0,
                 confidence: 0,
@@ -415,7 +415,7 @@ fn median_i128(env: &Env, values: &Vec<i128>) -> i128 {
 
     let mid = sorted.len() / 2;
 
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         let lo = sorted.get_unchecked(mid - 1);
         let hi = sorted.get_unchecked(mid);
         // Midpoint via `lo + (hi - lo) / 2` rather than `(lo + hi) / 2`.

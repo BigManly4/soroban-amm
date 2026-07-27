@@ -128,7 +128,7 @@ pub trait AmmPoolInterface {
 /// if quote.price_impact_bps > 100 {
 ///     return Err(MyError::TooMuchSlippage);
 /// }
-/// sdk.execute_swap(&trader, &token_a, 1_000_000, quote.amount_out * 99 / 100, deadline, None)?;
+/// sdk.execute_swap(&trader, &token_a, 1_000_000, quote.amount_out * 99 / 100, deadline)?;
 /// ```
 pub struct AmmPoolSdk<'a> {
     client: AmmPoolClient<'a>,
@@ -351,7 +351,7 @@ impl<'a> AmmPoolSdk<'a> {
     ) -> Result<i128, SdkAmmError> {
         Ok(self
             .client
-            .swap(trader, token_in, &amount_in, &min_out, &deadline, &referrer))
+            .swap(trader, token_in, &amount_in, &min_out, &deadline))
     }
 
     /// Execute a swap targeting an exact output amount.
@@ -363,13 +363,9 @@ impl<'a> AmmPoolSdk<'a> {
         max_in: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client.swap_exact_out(
-            trader,
-            token_out,
-            &amount_out,
-            &max_in,
-            &deadline,
-        ))
+        Ok(self
+            .client
+            .swap_exact_out(trader, token_out, &amount_out, &max_in, &deadline))
     }
 
     /// Add liquidity to the pool.

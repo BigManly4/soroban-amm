@@ -204,7 +204,6 @@ impl IncentiveCampaigns {
         assert!(now > campaign.end_time, "campaign not yet ended");
 
         let leftover = campaign.funding_amount - campaign.total_distributed;
-        let leftover = campaign.funding_amount - campaign.total_distributed;
 
         assert!(leftover > 0, "no leftover funds to recover");
 
@@ -436,7 +435,6 @@ mod tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::StellarAssetClient,
-        token::StellarAssetClient,
         Address, Env,
     };
     use token::{LpToken, LpTokenClient};
@@ -635,8 +633,7 @@ mod tests {
         env.ledger().with_mut(|l| l.timestamp = 9_000);
         let full_recovery = client.recover_leftover_funds(&gov_addr, &id2, &treasury);
         assert_eq!(
-            full_recovery,
-            1_000_000,
+            full_recovery, 1_000_000,
             "full budget should be recoverable when no claims made"
         );
 
