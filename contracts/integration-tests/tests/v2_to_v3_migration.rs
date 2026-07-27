@@ -77,6 +77,12 @@ impl MockV3Pool {
     pub fn get_current_tick(_env: Env) -> i32 {
         0_i32
     }
+
+    pub fn get_tokens(env: Env) -> (Address, Address) {
+        let token_a: Address = env.storage().instance().get(&0u32).unwrap();
+        let token_b: Address = env.storage().instance().get(&1u32).unwrap();
+        (token_a, token_b)
+    }
 }
 
 // ── Test fixture ──────────────────────────────────────────────────────────────
@@ -375,27 +381,12 @@ fn test_unauthorized_pool_pair_reverts() {
 
     let migration_addr = env.register_contract(None, MigrationContract);
     let migration = MigrationContractClient::new(&env, &migration_addr);
-    migration.initialize(&admin, &v2_addr, &v3_bad_addr);
 
-    let shares = LpTokenClient::new(&env, &v2_lp_addr).balance(&lp);
-
-    // The mock will try to pull token_c (which the migration never received)
-    // causing the transfer to fail
-    let result = migration.try_migrate(
-        &lp,
-        &shares,
-        &0_i128,
-        &0_i128,
-        &i32::MIN,
-        &i32::MAX,
-        &500_i32,
-        &0_i128,
-        &DEADLINE,
-    );
-
+    // initialize must reject a V3 pool trading a different pair
+    let init_result = migration.try_initialize(&admin, &v2_addr, &v3_bad_addr);
     assert!(
-        result.is_err(),
-        "migration with wrong V3 pool token pair should fail"
+        matches!(init_result, Err(Ok(MigrationError::TokenMismatch))),
+        "initialize with mismatched token pairs should return TokenMismatch"
     );
 }
 
