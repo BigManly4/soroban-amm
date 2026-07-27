@@ -60,6 +60,8 @@ pub enum DataKey {
     /// Per (campaign_id, provider): cumulative reward amount already accounted
     /// for by this provider's prior claims.
     ProviderDebt(u64, Address),
+    /// Per (campaign_id, provider): snapshot of accumulator at last claim.
+    ProviderSnapshot(u64, Address),
     /// Per campaign: total pool rewards accrued up to `CampaignLastAccrualTime`.
     CampaignAccruedRewards(u64),
     /// Per campaign: last timestamp up to which `CampaignAccruedRewards` was
@@ -381,7 +383,7 @@ impl IncentiveCampaigns {
 
         // Cap accrual at end_time so LPs can still claim earned rewards after the
         // campaign window closes without accruing phantom future rewards.
-        let accrual_time = now.min(campaign.end_time);
+        let claim_time = now.min(campaign.end_time);
 
         let lp_balance = LpTokenClient::new(&env, &campaign.lp_token).balance(&provider);
         assert!(lp_balance > 0, "no LP balance");
@@ -389,16 +391,15 @@ impl IncentiveCampaigns {
         let total_supply = LpTokenClient::new(&env, &campaign.lp_token).total_supply();
         assert!(total_supply > 0, "no LP supply");
 
-        // Proportional share of all rewards accrued so far, with the campaign's
-        // historical rate schedule checkpointed on every rate change.
-        let pool_rewards =
-            Self::checkpoint_campaign_rewards(&env, campaign_id, &campaign, claim_time);
-        let provider_share = pool_rewards * lp_balance / total_supply;
-
-        let debt_key = DataKey::ProviderDebt(campaign_id, provider.clone());
-        let already_claimed: i128 = if env.storage().persistent().has(&debt_key) {
-            extend_persistent_ttl(&env, &debt_key);
-            env.storage().persistent().get(&debt_key).unwrap()
+        // ── Step 2: advance campaign accumulator to current time ─────────────────
+        
+        // Update campaign accumulator based on time elapsed and total LP supply
+        campaign = advance_accumulator(campaign, claim_time, total_supply);
+        
+        let snapshot_key = DataKey::ProviderSnapshot(campaign_id, provider.clone());
+        let snapshot: Option<ProviderSnapshot> = if env.storage().persistent().has(&snapshot_key) {
+            extend_persistent_ttl(&env, &snapshot_key);
+            Some(env.storage().persistent().get(&snapshot_key).unwrap())
         } else {
             None
         };
