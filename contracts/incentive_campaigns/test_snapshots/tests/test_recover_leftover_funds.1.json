@@ -1867,6 +1867,8 @@
                     },
                     {
                       "key": {
+<<<<<<< HEAD
+=======
                         "symbol": "funding_amount"
                       },
                       "val": {
@@ -1878,6 +1880,7 @@
                     },
                     {
                       "key": {
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                         "symbol": "id"
                       },
                       "val": {
@@ -1944,7 +1947,11 @@
             },
             "ext": "v0"
           },
+<<<<<<< HEAD
+          3110400
+=======
           4095
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
         ]
       ],
       [
@@ -2002,6 +2009,8 @@
                     },
                     {
                       "key": {
+<<<<<<< HEAD
+=======
                         "symbol": "funding_amount"
                       },
                       "val": {
@@ -2013,6 +2022,7 @@
                     },
                     {
                       "key": {
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                         "symbol": "id"
                       },
                       "val": {
@@ -2079,7 +2089,11 @@
             },
             "ext": "v0"
           },
+<<<<<<< HEAD
+          3110400
+=======
           4095
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
         ]
       ],
       [
@@ -2137,6 +2151,8 @@
                     },
                     {
                       "key": {
+<<<<<<< HEAD
+=======
                         "symbol": "funding_amount"
                       },
                       "val": {
@@ -2148,6 +2164,7 @@
                     },
                     {
                       "key": {
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                         "symbol": "id"
                       },
                       "val": {
@@ -2214,7 +2231,146 @@
             },
             "ext": "v0"
           },
+<<<<<<< HEAD
+          3110400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "CampaignIdByIndex"
+                },
+                {
+                  "u64": 0
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "CampaignIdByIndex"
+                    },
+                    {
+                      "u64": 0
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          3110400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "CampaignIdByIndex"
+                },
+                {
+                  "u64": 1
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "CampaignIdByIndex"
+                    },
+                    {
+                      "u64": 1
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": 2
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          3110400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "CampaignIdByIndex"
+                },
+                {
+                  "u64": 2
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "CampaignIdByIndex"
+                    },
+                    {
+                      "u64": 2
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": 3
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          3110400
+=======
           4095
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
         ]
       ],
       [
@@ -2311,7 +2467,11 @@
             },
             "ext": "v0"
           },
+<<<<<<< HEAD
+          3110400
+=======
           4095
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
         ]
       ],
       [
@@ -2365,7 +2525,11 @@
             },
             "ext": "v0"
           },
+<<<<<<< HEAD
+          3110400
+=======
           4095
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
         ]
       ],
       [
@@ -2395,6 +2559,8 @@
                         "key": {
                           "vec": [
                             {
+<<<<<<< HEAD
+=======
                               "symbol": "CampaignIds"
                             }
                           ]
@@ -2417,6 +2583,7 @@
                         "key": {
                           "vec": [
                             {
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                               "symbol": "Governance"
                             }
                           ]
@@ -2456,7 +2623,11 @@
             },
             "ext": "v0"
           },
+<<<<<<< HEAD
+          3110400
+=======
           4095
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
         ]
       ],
       [
@@ -3165,7 +3336,11 @@
                       "val": {
                         "i128": {
                           "hi": 0,
+<<<<<<< HEAD
+                          "lo": 2200000
+=======
                           "lo": 1000000
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                         }
                       }
                     },
@@ -3238,7 +3413,11 @@
                       "val": {
                         "i128": {
                           "hi": 0,
+<<<<<<< HEAD
+                          "lo": 700100
+=======
                           "lo": 1900100
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                         }
                       }
                     },
@@ -3397,7 +3576,11 @@
             },
             "ext": "v0"
           },
+<<<<<<< HEAD
+          3110400
+=======
           518400
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
         ]
       ]
     ]
@@ -5204,7 +5387,11 @@
                 {
                   "i128": {
                     "hi": 0,
+<<<<<<< HEAD
+                    "lo": 300100
+=======
                     "lo": 900100
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                   }
                 }
               ]
@@ -5238,7 +5425,11 @@
             "data": {
               "i128": {
                 "hi": 0,
+<<<<<<< HEAD
+                "lo": 300100
+=======
                 "lo": 900100
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
               }
             }
           }
@@ -5290,7 +5481,11 @@
                 {
                   "i128": {
                     "hi": 0,
+<<<<<<< HEAD
+                    "lo": 300100
+=======
                     "lo": 900100
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                   }
                 }
               ]
@@ -5318,7 +5513,11 @@
             "data": {
               "i128": {
                 "hi": 0,
+<<<<<<< HEAD
+                "lo": 300100
+=======
                 "lo": 900100
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
               }
             }
           }
@@ -5374,7 +5573,11 @@
             "data": {
               "vec": [
                 {
+<<<<<<< HEAD
+                  "string": "caught panic 'campaign inactive' from contract function 'Symbol(obj#1511)'"
+=======
                   "string": "caught panic 'campaign inactive' from contract function 'Symbol(obj#1531)'"
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -5735,7 +5938,11 @@
                 {
                   "i128": {
                     "hi": 0,
+<<<<<<< HEAD
+                    "lo": 400000
+=======
                     "lo": 1000000
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                   }
                 }
               ]
@@ -5769,7 +5976,11 @@
             "data": {
               "i128": {
                 "hi": 0,
+<<<<<<< HEAD
+                "lo": 400000
+=======
                 "lo": 1000000
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
               }
             }
           }
@@ -5821,7 +6032,11 @@
                 {
                   "i128": {
                     "hi": 0,
+<<<<<<< HEAD
+                    "lo": 400000
+=======
                     "lo": 1000000
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                   }
                 }
               ]
@@ -5849,7 +6064,11 @@
             "data": {
               "i128": {
                 "hi": 0,
+<<<<<<< HEAD
+                "lo": 400000
+=======
                 "lo": 1000000
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
               }
             }
           }
@@ -6122,7 +6341,11 @@
             "data": {
               "vec": [
                 {
+<<<<<<< HEAD
+                  "string": "caught panic 'campaign not yet ended' from contract function 'Symbol(obj#1949)'"
+=======
                   "string": "caught panic 'campaign not yet ended' from contract function 'Symbol(obj#1993)'"
+>>>>>>> 852dd5c010a3be1cf6eb0b277d77653fd23b15ac
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"

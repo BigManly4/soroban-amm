@@ -2221,7 +2221,11 @@ mod tests {
         gov.vote(&a, &pid, &Vote::For);
 
         let p = gov.get_proposal(&pid);
-        assert_eq!(p.votes_for, 300 + 300, "B's power must not be counted twice");
+        assert_eq!(
+            p.votes_for,
+            300 + 300,
+            "B's power must not be counted twice"
+        );
     }
 
     #[test]

@@ -60,7 +60,12 @@ fn fee_amount(amount_in: i128, fee_bps: i128) -> i128 {
 /// Realised swap output — pure mirror of `cp_amount_out`, kept as a
 /// separate function so the equality property (#303) catches future
 /// drift if the two paths ever diverge.
-fn simulate_realised_swap(amount_in: i128, reserve_in: i128, reserve_out: i128, fee_bps: i128) -> i128 {
+fn simulate_realised_swap(
+    amount_in: i128,
+    reserve_in: i128,
+    reserve_out: i128,
+    fee_bps: i128,
+) -> i128 {
     cp_amount_out(amount_in, reserve_in, reserve_out, fee_bps)
 }
 
@@ -84,7 +89,12 @@ impl SimPool {
         // stay in i128 land; it's only the *ratio* of shares that
         // matters for the invariant.
         let shares = reserve_a.min(reserve_b);
-        Self { reserve_a, reserve_b, shares, fee_bps }
+        Self {
+            reserve_a,
+            reserve_b,
+            shares,
+            fee_bps,
+        }
     }
 
     /// Add liquidity at the current ratio. `amount_a` is the input
@@ -183,8 +193,20 @@ fn deploy_pool(env: &Env, fee_bps: i128) -> Pool<'_> {
     let token_hash = env.deployer().upload_contract_wasm(token_wasm::WASM);
 
     let admin = Address::generate(env);
-    let pool_addr = env.deployer().with_address(Address::generate(env), soroban_sdk::BytesN::from_array(env, &[0u8; 32])).deploy(amm_hash);
-    let lp_addr = env.deployer().with_address(Address::generate(env), soroban_sdk::BytesN::from_array(env, &[1u8; 32])).deploy(token_hash);
+    let pool_addr = env
+        .deployer()
+        .with_address(
+            Address::generate(env),
+            soroban_sdk::BytesN::from_array(env, &[0u8; 32]),
+        )
+        .deploy(amm_hash);
+    let lp_addr = env
+        .deployer()
+        .with_address(
+            Address::generate(env),
+            soroban_sdk::BytesN::from_array(env, &[1u8; 32]),
+        )
+        .deploy(token_hash);
 
     token_wasm::Client::new(env, &lp_addr).initialize(
         &pool_addr,
@@ -210,13 +232,23 @@ fn deploy_pool(env: &Env, fee_bps: i128) -> Pool<'_> {
     let provider = Address::generate(env);
     ta_sac.mint(&provider, &1_000_000_i128);
     tb_sac.mint(&provider, &1_000_000_i128);
-    client.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX);
+    client.add_liquidity(
+        &provider,
+        &1_000_000_i128,
+        &1_000_000_i128,
+        &0_i128,
+        &u64::MAX,
+    );
 
     let ta_addr = ta.address.clone();
     let tb_addr = tb.address.clone();
     drop((ta, ta_sac, tb, tb_sac));
 
-    Pool { client, ta: ta_addr, tb: tb_addr }
+    Pool {
+        client,
+        ta: ta_addr,
+        tb: tb_addr,
+    }
 }
 
 // ── Property-based tests ──────────────────────────────────────────────────────
@@ -732,7 +764,10 @@ mod regression {
         let k_before = r_in * r_out;
         let out = cp_amount_out(100_000, r_in, r_out, 30);
         let k_after = (r_in + 100_000) * (r_out - out);
-        assert!(k_after >= k_before, "k decreased at 30bps: before={k_before}, after={k_after}");
+        assert!(
+            k_after >= k_before,
+            "k decreased at 30bps: before={k_before}, after={k_after}"
+        );
     }
 
     #[test]
@@ -758,7 +793,7 @@ mod regression {
         // reserve values near 4e18 are used in the AMM overflow guard tests.
         // Verify formula handles them without overflow.
         let r = 4_000_000_000_000_000_000_i128; // 4e18
-        let amount_in = 1_000_000_000_i128;     // 1e9
+        let amount_in = 1_000_000_000_i128; // 1e9
         let fee_bps = 30_i128;
         // amount_in_with_fee = 1e9 * 9970 ~ 9.97e12; numerator ~ 9.97e12 * 4e18 ~ 4e31 < i128::MAX
         let out = cp_amount_out(amount_in, r, r, fee_bps);
@@ -804,11 +839,18 @@ mod regression {
     /// adverse for the trader regardless of starting reserves.
     #[test]
     fn regression_simulate_swap_direction_adverse() {
-        for (r_in, r_out) in [(1_000_000, 1_000_000), (500_000, 5_000_000), (5_000_000, 500_000)] {
+        for (r_in, r_out) in [
+            (1_000_000, 1_000_000),
+            (500_000, 5_000_000),
+            (5_000_000, 500_000),
+        ] {
             let pre_price = r_out as i128 * 1_000_000 / r_in as i128;
             let out = cp_amount_out(50_000, r_in, r_out, 30);
             let post_price = (r_out as i128 - out) * 1_000_000 / (r_in as i128 + 50_000);
-            assert!(post_price <= pre_price, "direction wrong for r_in={r_in}, r_out={r_out}");
+            assert!(
+                post_price <= pre_price,
+                "direction wrong for r_in={r_in}, r_out={r_out}"
+            );
         }
     }
 }
