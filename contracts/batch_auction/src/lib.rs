@@ -247,24 +247,27 @@ impl BatchAuction {
             return Err(AuctionError::ZeroAmount);
         }
 
-        // Validate the order's tokens against the pool's actual pair up front.
-        // If a mismatched pair slipped through, settle_batch would call swap
-        // with the wrong tokens and panic; since settlement is atomic, that
+        // Validate the order's tokens against the primary pool's actual pair up
+        // front. If a mismatched pair slipped through, settle_batch would call
+        // swap with the wrong tokens and panic; since settlement is atomic, that
         // panic reverts the whole batch and locks every other trader's escrow
         // until each order is cancelled individually (issue #361). AMM and CL
         // pools expose their token pair through different interfaces, so the
         // lookup must branch on pool_type (issue #470).
-        let (pool_token_a, pool_token_b) = match pool_type {
-            PoolType::Amm => {
-                let info = AmmPoolClient::new(&env, &pool).get_info();
-                (info.token_a, info.token_b)
-            }
-            PoolType::Cl => ConcentratedLiquidityClient::new(&env, &pool).get_tokens(),
-        };
-        let valid_pair = (token_in == pool_token_a && token_out == pool_token_b)
-            || (token_in == pool_token_b && token_out == pool_token_a);
-        if !valid_pair {
+        if !Self::pool_matches_pair(&env, &pool, pool_type, &token_in, &token_out) {
             return Err(AuctionError::InvalidPoolTokenPair);
+        }
+        // An alternate venue must trade the same pair as the primary venue.
+        // Otherwise best-venue routing could quote and select a real pool over
+        // `token_in -> token_x`, causing settlement to receive the wrong asset.
+        if let Some(ref alt) = alt_pool {
+            let alt_type = match pool_type {
+                PoolType::Amm => PoolType::Cl,
+                PoolType::Cl => PoolType::Amm,
+            };
+            if !Self::pool_matches_pair(&env, alt, alt_type, &token_in, &token_out) {
+                return Err(AuctionError::InvalidPoolTokenPair);
+            }
         }
 
         let mut pending: Vec<u64> = env
@@ -630,13 +633,38 @@ impl BatchAuction {
                 PoolType::Amm => PoolType::Cl,
                 PoolType::Cl => PoolType::Amm,
             };
-            if let Some(alt_q) = Self::try_quote(env, &alt, alt_type, order) {
-                if alt_q > primary_q {
-                    return (alt_q, alt, alt_type);
+            // Re-check the alternate venue's token pair at routing time so a
+            // malformed order written before validation was added can never be
+            // routed into the wrong output asset.
+            if Self::pool_matches_pair(env, &alt, alt_type, &order.token_in, &order.token_out) {
+                if let Some(alt_q) = Self::try_quote(env, &alt, alt_type, order) {
+                    if alt_q > primary_q {
+                        return (alt_q, alt, alt_type);
+                    }
                 }
             }
         }
         (primary_q, order.pool.clone(), order.pool_type)
+    }
+
+    /// Return whether `pool` trades exactly the unordered `(token_in, token_out)`
+    /// pair for the requested venue type.
+    fn pool_matches_pair(
+        env: &Env,
+        pool: &Address,
+        pool_type: PoolType,
+        token_in: &Address,
+        token_out: &Address,
+    ) -> bool {
+        let (pool_token_a, pool_token_b) = match pool_type {
+            PoolType::Amm => {
+                let info = AmmPoolClient::new(env, pool).get_info();
+                (info.token_a, info.token_b)
+            }
+            PoolType::Cl => ConcentratedLiquidityClient::new(env, pool).get_tokens(),
+        };
+        (token_in == &pool_token_a && token_out == &pool_token_b)
+            || (token_in == &pool_token_b && token_out == &pool_token_a)
     }
 
     /// Read-only output quote for `order` on `pool` interpreted as `pool_type`.
@@ -1332,6 +1360,107 @@ mod tests {
         // Realized output is at least the best quote's min_out and positive.
         assert!(results.get(0).unwrap() > 0);
         assert!(StellarTokenClient::new(&env, &tb).balance(&trader) > 0);
+    }
+
+    #[test]
+    fn test_submit_order_cl_rejects_alt_pool_with_wrong_pair() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let admin = Address::generate(&env);
+        let ta = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tb = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tc = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let cl_pool = deploy_cl_pool(&env, &admin, &ta, &tb);
+        let wrong_amm_pool = deploy_pool(&env, &ta, &tc);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+
+        let result = client.try_submit_order_cl(
+            &trader,
+            &cl_pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &true,
+            &0_u128,
+            &Some(wrong_amm_pool),
+            &u64::MAX,
+        );
+        assert_eq!(result, Err(Ok(AuctionError::InvalidPoolTokenPair)));
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&trader),
+            100_000_i128
+        );
+        assert_eq!(client.get_pending_orders().len(), 0);
+    }
+
+    #[test]
+    fn test_quote_order_ignores_stored_alt_pool_with_wrong_pair() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let admin = Address::generate(&env);
+        let ta = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tb = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tc = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        let primary_pool = deploy_cl_pool(&env, &admin, &ta, &tb);
+        let wrong_alt_pool = deploy_pool(&env, &ta, &tc);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        let order = Order {
+            id: 7,
+            trader,
+            pool: primary_pool.clone(),
+            token_in: ta.clone(),
+            token_out: tb.clone(),
+            amount_in: 10_000_i128,
+            min_out: 0_i128,
+            submitted_at: 1000,
+            deadline: u64::MAX,
+            pool_type: PoolType::Cl,
+            zero_for_one: true,
+            sqrt_price_limit: 0_u128,
+            alt_pool: Some(wrong_alt_pool),
+        };
+        env.as_contract(&auction_addr, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Order(order.id), &order);
+        });
+
+        let (best_out, best_pool, best_type) = client.quote_order(&order.id);
+        let primary_q = ConcentratedLiquidityClient::new(&env, &primary_pool)
+            .estimate_price_impact(&true, &10_000_i128, &0_u128)
+            .amount_out;
+        assert_eq!(best_out, primary_q);
+        assert_eq!(best_pool, primary_pool);
+        assert_eq!(best_type, PoolType::Cl);
     }
 
     #[test]
