@@ -2068,7 +2068,7 @@ impl ConcentratedLiquidity {
 
                 if zero_for_one {
                     active_liquidity -= tick_info.liquidity_net;
-                    current_tick = next_tick - 1;
+                    current_tick = (next_tick - 1).max(MIN_TICK);
                 } else {
                     active_liquidity += tick_info.liquidity_net;
                     current_tick = next_tick;
@@ -2867,7 +2867,7 @@ impl ConcentratedLiquidity {
                 let tick_info = Self::get_tick(env, next_tick);
                 if zero_for_one {
                     active_liquidity -= tick_info.liquidity_net;
-                    current_tick = next_tick - 1;
+                    current_tick = (next_tick - 1).max(MIN_TICK);
                 } else {
                     active_liquidity += tick_info.liquidity_net;
                     current_tick = next_tick;
