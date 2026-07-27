@@ -1923,8 +1923,9 @@ impl ConcentratedLiquidity {
         while amount_remaining > 0 {
             let next_tick_opt = Self::next_initialized_tick(&env, current_tick, zero_for_one);
             // No initialized ticks in this direction and no liquidity — nothing to trade.
+            // amount_remaining is left untouched so this untraded portion is excluded
+            // from amount_in_actual below.
             if next_tick_opt.is_none() && active_liquidity == 0 {
-                amount_remaining = 0;
                 break;
             }
 
@@ -2165,7 +2166,8 @@ impl ConcentratedLiquidity {
                 } else {
                     sqrt_price_x96 = target_price_x96;
                     current_tick = Self::price_to_tick(sqrt_price_x96);
-                    amount_remaining = 0;
+                    // No liquidity in this gap — amount_remaining is left untouched
+                    // so this untraded portion is excluded from amount_in_actual.
                 }
                 break;
             }
@@ -2789,8 +2791,10 @@ impl ConcentratedLiquidity {
 
         while amount_remaining > 0 {
             let next_tick_opt = Self::next_initialized_tick(env, current_tick, zero_for_one);
+            // No initialized ticks in this direction and no liquidity — nothing to trade.
+            // amount_remaining is left untouched so this untraded portion is excluded
+            // from amount_in_actual below.
             if next_tick_opt.is_none() && active_liquidity == 0 {
-                amount_remaining = 0;
                 break;
             }
 
@@ -2911,7 +2915,8 @@ impl ConcentratedLiquidity {
                 } else {
                     sqrt_price_x96 = target_price_x96;
                     current_tick = Self::price_to_tick(sqrt_price_x96);
-                    amount_remaining = 0;
+                    // No liquidity in this gap — amount_remaining is left untouched
+                    // so this untraded portion is excluded from amount_in_actual.
                 }
                 break;
             }
