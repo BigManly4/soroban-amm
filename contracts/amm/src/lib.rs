@@ -1152,7 +1152,12 @@ impl AmmPool {
             .instance()
             .get(&DataKey::ProtocolFeeBps)
             .unwrap_or(0);
-        if new_fee_bps < protocol_fee_bps {
+        // Must mirror set_protocol_fee's invariant: when protocol fees are
+        // active (protocol_fee_bps > 0), fee_bps must be *strictly* greater
+        // than protocol_fee_bps so LPs always retain a portion of swap income.
+        // Allowing fee_bps == protocol_fee_bps would route 100% of swap fees to
+        // the protocol, leaving LPs with nothing.
+        if protocol_fee_bps > 0 && new_fee_bps <= protocol_fee_bps {
             return Err(AmmError::InvalidFeeBps);
         }
         env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
