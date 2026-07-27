@@ -574,6 +574,9 @@ impl ConcentratedLiquidity {
         if amount_a_desired <= 0 && amount_b_desired <= 0 {
             return Err(ClError::ZeroAmounts);
         }
+        if amount_a_desired < 0 || amount_b_desired < 0 {
+            return Err(ClError::ZeroAmounts);
+        }
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
         let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
@@ -584,6 +587,9 @@ impl ConcentratedLiquidity {
             amount_a_desired,
             amount_b_desired,
         );
+        if amount_a < 0 || amount_b < 0 {
+            return Err(ClError::ZeroAmounts);
+        }
         if amount_a < min_a || amount_b < min_b {
             return Err(ClError::SlippageExceeded);
         }
