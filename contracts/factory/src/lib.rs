@@ -222,6 +222,10 @@ impl Factory {
     /// For most use cases, prefer `create_pool` with a standard fee tier.
     ///
     /// Token pair order is normalised. Panics if a pool for this pair already exists.
+    ///
+    /// Validations (fee_bps bounds, duplicate-pool check) are performed before
+    /// the rate-limit check and fee charge so a caller is never charged for a
+    /// request that would be rejected (issue #520).
     pub fn create_pool_with_fee_bps(
         env: Env,
         caller: Address,
@@ -231,6 +235,33 @@ impl Factory {
         governance_wasm_hash: Option<BytesN<32>>,
     ) -> Result<(Address, Option<Address>), FactoryError> {
         Self::ensure_creation_unpaused(&env)?;
+
+        // ── Validate BEFORE charging (issue #520) ─────────────────────────
+        // All checks below are pure validation with no side effects.  They
+        // must run before `check_and_update_rate_limit` / `charge_pool_creation_fee`
+        // so a caller is never charged or rate-limited for a request that
+        // would have been rejected anyway.
+
+        if !(0..=10_000).contains(&fee_bps) {
+            return Err(FactoryError::InvalidFeeBps);
+        }
+
+        // Normalise: smaller address is always token_a.
+        let (ta, tb) = if token_a < token_b {
+            (token_a, token_b)
+        } else {
+            (token_b, token_a)
+        };
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Pool(ta.clone(), tb.clone()))
+        {
+            return Err(FactoryError::PoolAlreadyExists);
+        }
+
+        // ── Auth, rate-limit, fee ─────────────────────────────────────────
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         let permissionless: bool = env
             .storage()
@@ -244,25 +275,6 @@ impl Factory {
             Self::charge_pool_creation_fee(&env, &caller, &admin)?;
         } else {
             admin.require_auth();
-        }
-
-        // Normalise: smaller address is always token_a.
-        let (ta, tb) = if token_a < token_b {
-            (token_a, token_b)
-        } else {
-            (token_b, token_a)
-        };
-
-        if !(0..=10_000).contains(&fee_bps) {
-            return Err(FactoryError::InvalidFeeBps);
-        }
-
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::Pool(ta.clone(), tb.clone()))
-        {
-            return Err(FactoryError::PoolAlreadyExists);
         }
 
         let amm_wasm: BytesN<32> = env.storage().instance().get(&DataKey::AmmWasmHash).unwrap();
@@ -491,6 +503,10 @@ impl Factory {
     /// the CL contract itself.
     ///
     /// Applies the same permissioned/permissionless access controls as `create_pool`.
+    ///
+    /// Validations (fee_bps bounds, duplicate-pool check) are performed before
+    /// the rate-limit check and fee charge so a caller is never charged for a
+    /// request that would be rejected (issue #520).
     pub fn create_cl_pool(
         env: Env,
         caller: Address,
@@ -500,21 +516,8 @@ impl Factory {
         initial_tick: i32,
     ) -> Result<Address, FactoryError> {
         Self::ensure_creation_unpaused(&env)?;
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        let permissionless: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::PermissionlessMode)
-            .unwrap_or(false);
 
-        if permissionless {
-            caller.require_auth();
-            Self::check_and_update_rate_limit(&env, &caller)?;
-            Self::charge_pool_creation_fee(&env, &caller, &admin)?;
-        } else {
-            admin.require_auth();
-        }
-
+        // ── Validate BEFORE charging (issue #520) ─────────────────────────
         if !(0..=10_000).contains(&fee_bps) {
             return Err(FactoryError::InvalidFeeBps);
         }
@@ -529,6 +532,22 @@ impl Factory {
         let cl_key = DataKey::ClPool(ta.clone(), tb.clone(), fee_bps);
         if env.storage().persistent().has(&cl_key) {
             return Err(FactoryError::ClPoolAlreadyExists);
+        }
+
+        // ── Auth, rate-limit, fee ─────────────────────────────────────────
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let permissionless: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::PermissionlessMode)
+            .unwrap_or(false);
+
+        if permissionless {
+            caller.require_auth();
+            Self::check_and_update_rate_limit(&env, &caller)?;
+            Self::charge_pool_creation_fee(&env, &caller, &admin)?;
+        } else {
+            admin.require_auth();
         }
 
         let cl_wasm: BytesN<32> = env
@@ -2533,5 +2552,176 @@ mod tests {
 
         // Execute global fee update proposal
         gov.execute(&pid2);
+    }
+
+    // ── Issue #520: validate before charging ────────────────────────────────────
+
+    /// Verify that a duplicate-pool error does NOT charge the pool-creation
+    /// fee or consume the caller's rate-limit slot (issue #520).
+    ///
+    /// Before the fix, `check_and_update_rate_limit` and
+    /// `charge_pool_creation_fee` ran *before* the `PoolAlreadyExists` check,
+    /// so a caller who accidentally requested an existing pair paid the fee
+    /// and burned their rate-limit cooldown for nothing.
+    #[test]
+    fn test_duplicate_pool_does_not_charge_fee_or_consume_rate_limit() {
+        let env = Env::default();
+        env.budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let amm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let token_hash = env.deployer().upload_contract_wasm(token::WASM);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(&env, &factory_addr);
+        factory.initialize(&admin, &amm_hash, &token_hash);
+
+        let fee_token_addr = setup_fee_token(&env, &admin, &user, 10_000);
+        let fee_client = soroban_sdk::token::Client::new(&env, &fee_token_addr);
+        factory.set_pool_creation_fee(&fee_token_addr, &100_i128);
+        factory.set_permissionless_mode(&true);
+        factory.set_rate_limit(&5u32);
+
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+
+        // First creation succeeds — fee charged, rate limit recorded.
+        factory.create_pool_with_fee_bps(&user, &ta, &tb, &30_i128, &None);
+        let balance_after_first = fee_client.balance(&user);
+
+        // Duplicate creation must fail WITHOUT charging a second fee.
+        let result = factory.try_create_pool_with_fee_bps(&user, &ta, &tb, &30_i128, &None);
+        assert_eq!(
+            result,
+            Err(Ok(FactoryError::PoolAlreadyExists)),
+            "duplicate pool must return PoolAlreadyExists"
+        );
+        assert_eq!(
+            fee_client.balance(&user),
+            balance_after_first,
+            "fee must NOT be charged for a rejected duplicate"
+        );
+
+        // The rate limit must not have been consumed by the failed call, so
+        // after advancing past the window, an immediate creation of a
+        // DIFFERENT pair must succeed.
+        let tc = Address::generate(&env);
+        let td = Address::generate(&env);
+        // Advance past the 5-ledger rate limit window.
+        env.ledger().with_mut(|l| l.sequence_number = 6);
+        let result2 = factory.try_create_pool_with_fee_bps(&user, &tc, &td, &30_i128, &None);
+        assert!(
+            result2.is_ok(),
+            "rate limit must not be consumed by the rejected duplicate"
+        );
+    }
+
+    /// Same as above but for invalid fee_bps — the caller must not be
+    /// charged or rate-limited when the request is rejected up front.
+    #[test]
+    fn test_invalid_fee_bps_does_not_charge_fee_or_consume_rate_limit() {
+        let env = Env::default();
+        env.budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let amm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let token_hash = env.deployer().upload_contract_wasm(token::WASM);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(&env, &factory_addr);
+        factory.initialize(&admin, &amm_hash, &token_hash);
+
+        let fee_token_addr = setup_fee_token(&env, &admin, &user, 10_000);
+        let fee_client = soroban_sdk::token::Client::new(&env, &fee_token_addr);
+        factory.set_pool_creation_fee(&fee_token_addr, &100_i128);
+        factory.set_permissionless_mode(&true);
+        factory.set_rate_limit(&5u32);
+
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+
+        // Invalid fee_bps (> 10 000) must be rejected without charge.
+        let result = factory.try_create_pool_with_fee_bps(&user, &ta, &tb, &99_999_i128, &None);
+        assert_eq!(
+            result,
+            Err(Ok(FactoryError::InvalidFeeBps)),
+            "invalid fee_bps must return InvalidFeeBps"
+        );
+        assert_eq!(
+            fee_client.balance(&user),
+            10_000_i128,
+            "fee must NOT be charged for invalid fee_bps"
+        );
+
+        // Rate limit was not consumed — a valid creation must succeed.
+        let tc = Address::generate(&env);
+        let td = Address::generate(&env);
+        let result2 = factory.try_create_pool_with_fee_bps(&user, &tc, &td, &30_i128, &None);
+        assert!(
+            result2.is_ok(),
+            "rate limit must not be consumed by the rejected call"
+        );
+    }
+
+    /// CL pool variant: duplicate-pool error must not charge or rate-limit.
+    #[test]
+    fn test_cl_duplicate_pool_does_not_charge_fee_or_consume_rate_limit() {
+        let env = Env::default();
+        env.budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let amm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let token_hash = env.deployer().upload_contract_wasm(token::WASM);
+        let cl_hash = env
+            .deployer()
+            .upload_contract_wasm(concentrated_liquidity::WASM);
+
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(&env, &factory_addr);
+        factory.initialize(&admin, &amm_hash, &token_hash);
+        factory.set_cl_wasm_hash(&cl_hash);
+
+        let fee_token_addr = setup_fee_token(&env, &admin, &user, 10_000);
+        let fee_client = soroban_sdk::token::Client::new(&env, &fee_token_addr);
+        factory.set_pool_creation_fee(&fee_token_addr, &100_i128);
+        factory.set_permissionless_mode(&true);
+        factory.set_rate_limit(&5u32);
+
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+
+        // First CL pool creation succeeds.
+        factory.create_cl_pool(&user, &ta, &tb, &30_i128, &0_i32);
+        let balance_after_first = fee_client.balance(&user);
+
+        // Duplicate must fail without a second charge.
+        let result = factory.try_create_cl_pool(&user, &ta, &tb, &30_i128, &0_i32);
+        assert_eq!(
+            result,
+            Err(Ok(FactoryError::ClPoolAlreadyExists)),
+            "duplicate CL pool must return ClPoolAlreadyExists"
+        );
+        assert_eq!(
+            fee_client.balance(&user),
+            balance_after_first,
+            "fee must NOT be charged for a rejected CL duplicate"
+        );
+
+        // Rate limit was not consumed by the failed call — advance past the
+        // window and create a different pair.
+        let tc = Address::generate(&env);
+        let td = Address::generate(&env);
+        env.ledger().with_mut(|l| l.sequence_number = 6);
+        let result2 = factory.try_create_cl_pool(&user, &tc, &td, &30_i128, &0_i32);
+        assert!(
+            result2.is_ok(),
+            "rate limit must not be consumed by the rejected CL duplicate"
+        );
     }
 }

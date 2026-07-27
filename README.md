@@ -455,6 +455,7 @@ Source: [`contracts/governance/src/lib.rs`](contracts/governance/src/lib.rs).
 | 31 | `InsufficientSnapshotBal` | The snapshot balance is below the required threshold. |
 | 32 | `VetoMultisigNotSet` | The veto multisig address has not been configured. |
 | 33 | `NoPendingAdmin` | An admin transfer was accepted while no pending admin is set. |
+| 34 | `PartialFactoryUpdate` | An `UpdateFactoryGlobalFee` proposal's `offset`/`limit` window does not start at 0 or does not cover every pool in the factory; execution is rejected to prevent the proposal from being marked executed while pools remain untouched. |
 
 ### LP Token Contract Errors
 

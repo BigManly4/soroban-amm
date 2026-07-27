@@ -984,6 +984,10 @@ impl Staking {
 }
 
 #[cfg(test)]
+#[path = "tests.rs"]
+mod cap_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{

@@ -250,6 +250,7 @@ impl LpToken {
         live_until_ledger: u32,
     ) {
         from.require_auth();
+        assert!(amount >= 0, "amount must be non-negative");
         if amount > 0 {
             assert!(
                 live_until_ledger >= env.ledger().sequence(),
@@ -451,7 +452,12 @@ impl LpToken {
             checkpoints.remove(0);
             // Record that the oldest history has been dropped so `balance_at`
             // errors on queries it can no longer answer accurately rather than
-            // silently returning a wrong balance.
+            // silently returning a wrong balance. A truncated account stays at
+            // MAX_CHECKPOINTS forever, so every later distinct-ledger write
+            // re-enters this branch; extending the flag's TTL here (together
+            // with `balance_at` doing the same on reads) keeps it alive in
+            // lockstep with the checkpoints it guards, without adding any cost
+            // to the common, non-truncated write path.
             let trunc_key = DataKey::CheckpointsTruncated(account.clone());
             if !env.storage().persistent().has(&trunc_key) {
                 env.storage().persistent().set(&trunc_key, &true);
@@ -487,6 +493,11 @@ impl LpToken {
                 .persistent()
                 .extend_ttl(&trunc_key, Self::MIN_TTL, Self::BUMP_TO);
         }
+        checkpoints.push_back(Checkpoint { ledger, balance });
+        env.storage().persistent().set(&key, &checkpoints);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, Self::MIN_TTL, Self::BUMP_TO);
     }
 }
 
@@ -636,6 +647,18 @@ mod tests {
         ts.env.ledger().with_mut(|l| l.sequence_number = 100);
         let past = ts.env.ledger().sequence() - 1;
         assert!(client.try_approve(&alice, &bob, &100_i128, &past).is_err());
+    }
+
+    #[test]
+    fn test_approve_negative_amount_panics() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        let bob = Address::generate(&ts.env);
+        let live_until = ts.env.ledger().sequence() + 100;
+        assert!(client
+            .try_approve(&alice, &bob, &-100_i128, &live_until)
+            .is_err());
     }
 
     #[test]

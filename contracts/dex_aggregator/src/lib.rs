@@ -9,6 +9,9 @@ use soroban_sdk::{
 use amm::{AmmPoolClient, PoolInfo};
 use factory::FactoryClient;
 
+const MIN_TTL: u32 = 172_800;
+const BUMP_TO: u32 = 518_400;
+
 #[contractclient(name = "ClPoolClient")]
 pub trait ClPoolInterface {
     fn estimate_price_impact(
@@ -91,7 +94,8 @@ pub struct RouteQuote {
 pub enum DataKey {
     Factory,
     MaxHops,
-    ClPools,
+    ClPoolCount,
+    ClPool(u32),
 }
 
 #[contract]
@@ -102,6 +106,7 @@ impl DexAggregator {
     pub const DEFAULT_MAX_HOPS: u32 = 4;
     pub const PRICE_TOLERANCE_BPS: i128 = 10;
     pub const BPS: i128 = 10_000;
+    pub const MAX_CL_POOLS: u32 = 50;
     pub const CL_FEE_TIERS: [i128; 3] = [30, 100, 500];
 
     pub fn initialize(env: Env, factory: Address) {
@@ -115,7 +120,7 @@ impl DexAggregator {
             .set(&DataKey::MaxHops, &Self::DEFAULT_MAX_HOPS);
         env.storage()
             .instance()
-            .set(&DataKey::ClPools, &Vec::<ClPoolInfo>::new(&env));
+            .set(&DataKey::ClPoolCount, &0u32);
     }
 
     pub fn register_cl_pool(
@@ -125,26 +130,41 @@ impl DexAggregator {
         token_b: Address,
         fee_bps: i128,
     ) {
-        let mut cl_pools: Vec<ClPoolInfo> = env
+        Self::extend_ttl(&env);
+        let count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ClPools)
-            .unwrap_or_else(|| Vec::new(&env));
+            .get(&DataKey::ClPoolCount)
+            .unwrap_or(0);
 
-        for i in 0..cl_pools.len() {
-            let entry = cl_pools.get(i).unwrap();
+        for i in 0..count {
+            let entry: ClPoolInfo = env
+                .storage()
+                .instance()
+                .get(&DataKey::ClPool(i))
+                .unwrap();
             if entry.pool == pool {
                 return;
             }
         }
 
-        cl_pools.push_back(ClPoolInfo {
-            pool: pool.clone(),
-            token_a: token_a.clone(),
-            token_b: token_b.clone(),
-            fee_bps,
-        });
-        env.storage().instance().set(&DataKey::ClPools, &cl_pools);
+        assert!(
+            count < Self::MAX_CL_POOLS,
+            "max CL pools reached"
+        );
+
+        env.storage().instance().set(
+            &DataKey::ClPool(count),
+            &ClPoolInfo {
+                pool: pool.clone(),
+                token_a: token_a.clone(),
+                token_b: token_b.clone(),
+                fee_bps,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::ClPoolCount, &(count + 1));
     }
 
     /// Find the best route up to `max_hops` pools deep (#319).
@@ -155,6 +175,7 @@ impl DexAggregator {
         amount_in: i128,
         max_hops: u32,
     ) -> Result<RouteQuote, AggregatorError> {
+        Self::extend_ttl(&env);
         assert!(token_in != token_out, "same token");
         assert!(amount_in > 0, "amount must be positive");
         let cap = max_hops.min(Self::DEFAULT_MAX_HOPS);
@@ -184,6 +205,7 @@ impl DexAggregator {
         min_out: i128,
         deadline: u64,
     ) -> Result<i128, AggregatorError> {
+        Self::extend_ttl(&env);
         trader.require_auth();
         if route.hops.is_empty() || route.amount_out < min_out {
             return Err(AggregatorError::SlippageExceeded);
@@ -202,6 +224,7 @@ impl DexAggregator {
         amount_in: i128,
         min_out: i128,
     ) -> Result<i128, AggregatorError> {
+        Self::extend_ttl(&env);
         let max_hops: u32 = env
             .storage()
             .instance()
@@ -219,6 +242,7 @@ impl DexAggregator {
         amount_in: i128,
         quoted_out: i128,
     ) -> bool {
+        Self::extend_ttl(&env);
         let max_hops: u32 = env
             .storage()
             .instance()
@@ -397,9 +421,9 @@ impl DexAggregator {
             }
         }
 
-        let cl_pools = Self::registered_cl_pools(env);
-        for i in 0..cl_pools.len() {
-            let info = cl_pools.get(i).unwrap();
+        let cl_count: u32 = env.storage().instance().get(&DataKey::ClPoolCount).unwrap_or(0);
+        for i in 0..cl_count {
+            let info: ClPoolInfo = env.storage().instance().get(&DataKey::ClPool(i)).unwrap();
             if !(Self::is_cl_pool_match(&info, token_in, token_out)) {
                 continue;
             }
@@ -481,20 +505,13 @@ impl DexAggregator {
             Self::push_unique(&mut tokens, info.token_b);
         }
 
-        let cl_pools = Self::registered_cl_pools(env);
-        for i in 0..cl_pools.len() {
-            let info = cl_pools.get(i).unwrap();
+        let cl_count: u32 = env.storage().instance().get(&DataKey::ClPoolCount).unwrap_or(0);
+        for i in 0..cl_count {
+            let info: ClPoolInfo = env.storage().instance().get(&DataKey::ClPool(i)).unwrap();
             Self::push_unique(&mut tokens, info.token_a.clone());
             Self::push_unique(&mut tokens, info.token_b.clone());
         }
         tokens
-    }
-
-    fn registered_cl_pools(env: &Env) -> Vec<ClPoolInfo> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ClPools)
-            .unwrap_or_else(|| Vec::new(env))
     }
 
     fn is_cl_pool_match(info: &ClPoolInfo, token_in: &Address, token_out: &Address) -> bool {
@@ -520,6 +537,10 @@ impl DexAggregator {
             }
         }
         vec.push_back(addr);
+    }
+
+    fn extend_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(MIN_TTL, BUMP_TO);
     }
 }
 

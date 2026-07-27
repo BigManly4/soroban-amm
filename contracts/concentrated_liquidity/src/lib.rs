@@ -574,6 +574,9 @@ impl ConcentratedLiquidity {
         if amount_a_desired <= 0 && amount_b_desired <= 0 {
             return Err(ClError::ZeroAmounts);
         }
+        if amount_a_desired < 0 || amount_b_desired < 0 {
+            return Err(ClError::ZeroAmounts);
+        }
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
         let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
@@ -584,6 +587,9 @@ impl ConcentratedLiquidity {
             amount_a_desired,
             amount_b_desired,
         );
+        if amount_a < 0 || amount_b < 0 {
+            return Err(ClError::ZeroAmounts);
+        }
         if amount_a < min_a || amount_b < min_b {
             return Err(ClError::SlippageExceeded);
         }
@@ -2565,7 +2571,12 @@ impl ConcentratedLiquidity {
             let sqrt_upper = Self::tick_to_sqrt_price_x96(ut);
             math::get_liquidity_for_amount1(sqrt_lower, sqrt_upper, b).max(1)
         } else {
-            a.min(b).max(1)
+            let sqrt_lower = Self::tick_to_sqrt_price_x96(lt);
+            let sqrt_upper = Self::tick_to_sqrt_price_x96(ut);
+            let sqrt_current = Self::tick_to_sqrt_price_x96(ct);
+            let liquidity_from_amount0 = math::get_liquidity_for_amount0(sqrt_current, sqrt_upper, a);
+            let liquidity_from_amount1 = math::get_liquidity_for_amount1(sqrt_lower, sqrt_current, b);
+            liquidity_from_amount0.min(liquidity_from_amount1).max(1)
         }
     }
 
