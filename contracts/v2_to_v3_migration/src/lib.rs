@@ -316,8 +316,10 @@ impl MigrationContract {
             let current_tick = v3_client.get_current_tick();
             // Align to tick spacing of 1 (V3 implementations may enforce spacing;
             // callers should pass a width that is a multiple of their pool's spacing).
-            let lower = current_tick - range_width_ticks;
-            let upper = current_tick + range_width_ticks;
+            let lower = current_tick.checked_sub(range_width_ticks)
+                .ok_or(MigrationError::InvalidRange)?;
+            let upper = current_tick.checked_add(range_width_ticks)
+                .ok_or(MigrationError::InvalidRange)?;
             return Ok((lower, upper));
         }
         // Explicit ticks: basic sanity check.
