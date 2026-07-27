@@ -826,6 +826,7 @@ impl ConcentratedLiquidity {
             return Err(ClError::Paused);
         }
         provider.require_auth();
+        Self::ensure_legacy_owner(&env, &provider, lower_tick, upper_tick)?;
 
         // ── Validate tick range ───────────────────────────────────────────────
         if lower_tick >= upper_tick {
