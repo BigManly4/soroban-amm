@@ -9,6 +9,4 @@ crate-type = ["lib"]
 
 [dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-token = { path = "../token", features = ["testutils"] }
-amm = { path = "../amm", features = ["testutils"] }
 proptest = "1"
