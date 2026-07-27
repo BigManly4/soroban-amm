@@ -266,6 +266,14 @@ impl MigrationContract {
             &true, // fee_discount: migration incentive
         );
 
+        // ── Revoke approvals granted to v3_pool (fix #542) ────────────────────
+        // Setting amount=0 with any expiry revokes the allowance. A ledger of 0
+        // is only valid when the amount is 0 (SEP-41 permits it), so we use the
+        // current ledger sequence which is always valid.
+        let revoke_expiry = env.ledger().sequence();
+        ta_client.approve(&contract_addr, &v3_pool, &0, &revoke_expiry);
+        tb_client.approve(&contract_addr, &v3_pool, &0, &revoke_expiry);
+
         // ── Step 4: refund leftover dust to provider ──────────────────────────
         // Computed as the call-scoped delta, not the contract's absolute
         // balance, so pre-existing tokens at this shared address are never
