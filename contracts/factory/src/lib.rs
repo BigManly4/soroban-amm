@@ -46,6 +46,8 @@ pub trait ClPoolInterface {
         initial_tick: i32,
         tick_spacing: i32,
     );
+
+    fn get_pool_state(env: Env) -> concentrated_liquidity::PoolState;
 }
 
 #[contractclient(name = "AmmPoolClient")]
@@ -558,11 +560,15 @@ impl Factory {
             .with_current_contract(cl_salt)
             .deploy(cl_wasm);
 
-        // Derive tick_spacing from fee tier (matching Uniswap v3 conventions).
+        // Derive tick_spacing from fee tier using the same tiering as the
+        // dex_aggregator and the standard concentrated-liquidity fee tiers.
+        // The 500 bps tier is an actively routed fee tier and must not fall
+        // back to the near-zero-fee spacing.
         let tick_spacing: i32 = match fee_bps {
             5 => 1,
             30 => 10,
             100 => 60,
+            500 => 200,
             _ => 1,
         };
         ClPoolClient::new(&env, &pool_addr).initialize(
@@ -1684,6 +1690,33 @@ mod tests {
 
         // Missing tier returns None.
         assert_eq!(factory.get_cl_pool(&ta, &tb, &500_i128), None);
+    }
+
+    #[test]
+    fn test_create_cl_pool_500_bps_uses_wider_tick_spacing() {
+        let env = Env::default();
+        env.budget().reset_unlimited();
+        env.mock_all_auths();
+
+        let amm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let token_hash = env.deployer().upload_contract_wasm(token::WASM);
+        let cl_hash = env
+            .deployer()
+            .upload_contract_wasm(concentrated_liquidity::WASM);
+
+        let admin = Address::generate(&env);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(&env, &factory_addr);
+        factory.initialize(&admin, &amm_hash, &token_hash);
+        factory.set_cl_wasm_hash(&cl_hash);
+
+        let ta = Address::generate(&env);
+        let tb = Address::generate(&env);
+
+        let pool_addr = factory.create_cl_pool(&admin, &ta, &tb, &500_i128, &0_i32);
+        let state = ClPoolClient::new(&env, &pool_addr).get_pool_state();
+
+        assert_eq!(state.tick_spacing, 200);
     }
 
     #[test]
