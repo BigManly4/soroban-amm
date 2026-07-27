@@ -2783,7 +2783,25 @@ impl AmmPool {
         if shares <= 0 {
             return Err(AmmError::ZeroAmount);
         }
-        if shares < min_shares {
+
+        // Issue #294: on the very first deposit, permanently lock MINIMUM_LIQUIDITY
+        // LP tokens to the contract address so the pool can never be fully drained.
+        const MINIMUM_LIQUIDITY: i128 = 1_000;
+        let already_locked: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinLiquidityLocked)
+            .unwrap_or(false);
+        let (shares_to_provider, shares_locked) = if total_shares == 0 && !already_locked {
+            if shares <= MINIMUM_LIQUIDITY {
+                return Err(AmmError::InsufficientShares);
+            }
+            (shares - MINIMUM_LIQUIDITY, MINIMUM_LIQUIDITY)
+        } else {
+            (shares, 0)
+        };
+
+        if shares_to_provider < min_shares {
             return Err(AmmError::SlippageExceeded);
         }
 
@@ -2795,17 +2813,27 @@ impl AmmPool {
             .set(&DataKey::ReserveB, &(reserve_b + actual_b));
         env.storage()
             .instance()
-            .set(&DataKey::TotalShares, &(total_shares + shares));
+            .set(
+                &DataKey::TotalShares,
+                &(total_shares + shares_to_provider + shares_locked),
+            );
 
-        LpTokenClient::new(&env, &lp_token).mint(&provider, &shares);
+        let lp_client = LpTokenClient::new(&env, &lp_token);
+        if shares_locked > 0 {
+            lp_client.mint(&env.current_contract_address(), &shares_locked);
+            env.storage()
+                .instance()
+                .set(&DataKey::MinLiquidityLocked, &true);
+        }
+        lp_client.mint(&provider, &shares_to_provider);
 
         soroban_amm_sdk::emit_versioned_event!(
             env,
             (Symbol::new(&env, "add_liquidity"), provider),
-            (actual_a, actual_b, shares)
+            (actual_a, actual_b, shares_to_provider)
         );
 
-        Ok(shares)
+        Ok(shares_to_provider)
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
