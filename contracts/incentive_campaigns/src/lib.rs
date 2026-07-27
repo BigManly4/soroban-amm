@@ -22,8 +22,14 @@ pub enum DataKey {
     NextCampaignId,
     Campaign(u64),
     CampaignIdByIndex(u64),
-    /// Per (campaign_id, provider): cumulative reward index at last claim
+    /// Per (campaign_id, provider): cumulative reward amount already accounted
+    /// for by this provider's prior claims.
     ProviderDebt(u64, Address),
+    /// Per campaign: total pool rewards accrued up to `CampaignLastAccrualTime`.
+    CampaignAccruedRewards(u64),
+    /// Per campaign: last timestamp up to which `CampaignAccruedRewards` was
+    /// checkpointed. Initialized logically to `campaign.start_time`.
+    CampaignLastAccrualTime(u64),
     /// Audit: next distribution record id
     NextDistributionId,
     DistributionRecord(u64),
@@ -130,6 +136,14 @@ impl IncentiveCampaigns {
         let campaign_key = DataKey::Campaign(id);
         env.storage().persistent().set(&campaign_key, &campaign);
         extend_persistent_ttl(&env, &campaign_key);
+        let accrued_key = DataKey::CampaignAccruedRewards(id);
+        env.storage().persistent().set(&accrued_key, &0_i128);
+        extend_persistent_ttl(&env, &accrued_key);
+        let last_accrual_key = DataKey::CampaignLastAccrualTime(id);
+        env.storage()
+            .persistent()
+            .set(&last_accrual_key, &start_time);
+        extend_persistent_ttl(&env, &last_accrual_key);
 
         env.storage()
             .instance()
@@ -163,6 +177,7 @@ impl IncentiveCampaigns {
             .get(&campaign_key)
             .expect("campaign not found");
         extend_persistent_ttl(&env, &campaign_key);
+        Self::checkpoint_campaign_rewards(&env, campaign_id, &campaign, env.ledger().timestamp());
         campaign.reward_rate = new_rate;
         env.storage().persistent().set(&campaign_key, &campaign);
         env.events().publish(
@@ -202,6 +217,7 @@ impl IncentiveCampaigns {
 
         let now = env.ledger().timestamp();
         assert!(now > campaign.end_time, "campaign not yet ended");
+        Self::checkpoint_campaign_rewards(&env, campaign_id, &campaign, now);
 
         let leftover = campaign.funding_amount - campaign.total_distributed;
 
@@ -253,9 +269,10 @@ impl IncentiveCampaigns {
         let total_supply = LpTokenClient::new(&env, &campaign.lp_token).total_supply();
         assert!(total_supply > 0, "no LP supply");
 
-        // Proportional share of rewards since campaign start, capped at end_time.
-        let elapsed = (claim_time - campaign.start_time) as i128;
-        let pool_rewards = campaign.reward_rate * elapsed;
+        // Proportional share of all rewards accrued so far, with the campaign's
+        // historical rate schedule checkpointed on every rate change.
+        let pool_rewards =
+            Self::checkpoint_campaign_rewards(&env, campaign_id, &campaign, claim_time);
         let provider_share = pool_rewards * lp_balance / total_supply;
 
         let debt_key = DataKey::ProviderDebt(campaign_id, provider.clone());
@@ -425,6 +442,58 @@ impl IncentiveCampaigns {
     fn require_governance(env: &Env, caller: &Address) {
         let gov: Address = env.storage().instance().get(&DataKey::Governance).unwrap();
         assert!(caller == &gov, "not governance");
+    }
+
+    fn campaign_accrual_time(campaign: &Campaign, now: u64) -> u64 {
+        if now <= campaign.start_time {
+            campaign.start_time
+        } else if now >= campaign.end_time {
+            campaign.end_time
+        } else {
+            now
+        }
+    }
+
+    fn checkpoint_campaign_rewards(
+        env: &Env,
+        campaign_id: u64,
+        campaign: &Campaign,
+        now: u64,
+    ) -> i128 {
+        let accrued_key = DataKey::CampaignAccruedRewards(campaign_id);
+        let last_accrual_key = DataKey::CampaignLastAccrualTime(campaign_id);
+
+        let mut accrued: i128 = env
+            .storage()
+            .persistent()
+            .get(&accrued_key)
+            .unwrap_or(0_i128);
+        let mut last_accrual: u64 = env
+            .storage()
+            .persistent()
+            .get(&last_accrual_key)
+            .unwrap_or(campaign.start_time);
+
+        let accrual_until = Self::campaign_accrual_time(campaign, now);
+        if last_accrual < campaign.start_time {
+            last_accrual = campaign.start_time;
+        } else if last_accrual > campaign.end_time {
+            last_accrual = campaign.end_time;
+        }
+
+        if accrual_until > last_accrual {
+            let elapsed = (accrual_until - last_accrual) as i128;
+            accrued += campaign.reward_rate * elapsed;
+            last_accrual = accrual_until;
+        }
+
+        env.storage().persistent().set(&accrued_key, &accrued);
+        extend_persistent_ttl(env, &accrued_key);
+        env.storage()
+            .persistent()
+            .set(&last_accrual_key, &last_accrual);
+        extend_persistent_ttl(env, &last_accrual_key);
+        accrued
     }
 }
 
@@ -697,5 +766,54 @@ mod tests {
         let active_page_2 = client.get_active_campaigns_paged(&2, &2);
         // Index 2 (id3) is evaluated. Campaign 3 has start_time=4_000, so it's filtered out.
         assert_eq!(active_page_2.len(), 0);
+    }
+
+    #[test]
+    fn test_rate_increase_checkpoints_prior_accrual() {
+        let (env, incentives, pool, lp, reward, provider, gov_addr) = setup();
+        let client = IncentiveCampaignsClient::new(&env, &incentives);
+        let id = client.create_campaign(
+            &gov_addr, &pool, &lp, &reward, &1_000, &5_000, &100, &2_000_000,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = 2_000);
+        let first_claim = client.claim_rewards(&provider, &id);
+        assert_eq!(first_claim, 99_900);
+
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+        client.set_campaign_rate(&gov_addr, &id, &200);
+
+        env.ledger().with_mut(|l| l.timestamp = 4_000);
+        let second_claim = client.claim_rewards(&provider, &id);
+        // Piecewise accrual:
+        // t=1_000..3_000 @ 100 = 200_000 pool rewards
+        // t=3_000..4_000 @ 200 = 200_000 pool rewards
+        // Provider owns 999_000 / 1_000_000 of LP supply => cumulative 399_600.
+        // After the first 99_900 claim, only 299_700 remains.
+        assert_eq!(second_claim, 299_700);
+    }
+
+    #[test]
+    fn test_rate_decrease_does_not_block_future_claims() {
+        let (env, incentives, pool, lp, reward, provider, gov_addr) = setup();
+        let client = IncentiveCampaignsClient::new(&env, &incentives);
+        let id = client.create_campaign(
+            &gov_addr, &pool, &lp, &reward, &1_000, &5_000, &200, &2_000_000,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+        let first_claim = client.claim_rewards(&provider, &id);
+        assert_eq!(first_claim, 399_600);
+
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+        client.set_campaign_rate(&gov_addr, &id, &100);
+
+        env.ledger().with_mut(|l| l.timestamp = 4_000);
+        let second_claim = client.claim_rewards(&provider, &id);
+        // Piecewise accrual:
+        // t=1_000..3_000 @ 200 = 400_000 pool rewards
+        // t=3_000..4_000 @ 100 = 100_000 pool rewards
+        // Provider's cumulative share is 499_500, so 99_900 remains claimable.
+        assert_eq!(second_claim, 99_900);
     }
 }
