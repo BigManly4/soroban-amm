@@ -158,6 +158,10 @@ impl OracleAggregator {
             panic_with_error!(&env, OracleError::SourceNotFound);
         }
 
+        if new_sources.len() < MIN_VALID_SOURCES {
+            panic_with_error!(&env, OracleError::InsufficientSources);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::Sources, &new_sources);
