@@ -1289,7 +1289,10 @@ impl Governance {
         if decay_rate == 0 {
             return base;
         }
-        let now = env.ledger().timestamp();
+        // Freeze decay at vote_end: once voting closes the tally is final, so
+        // the required quorum must not keep climbing based on when execute(),
+        // veto(), or proposal_status() happen to be called afterward.
+        let now = env.ledger().timestamp().min(proposal.vote_end);
         let days_open = if now > proposal.vote_start {
             (now - proposal.vote_start) / 86_400
         } else {
@@ -2436,9 +2439,10 @@ mod tests {
 
         let proposal = gov.get_proposal(&pid);
         s.env.ledger().set_timestamp(proposal.execute_after + 1);
-        // At execute_after (~9 days from vote_start), effective quorum = 1000 + 9*100 = 1900.
-        // 1000 total votes >= quorum_threshold (1000*1900/10000=190) so proposal passes.
-        assert_eq!(gov.get_effective_quorum(&pid), 1_900);
+        // Decay freezes at vote_end (7 days from vote_start), so effective
+        // quorum = 1000 + 7*100 = 1700 regardless of when execute() is called.
+        // 1000 total votes >= quorum_threshold (1000*1700/10000=170) so proposal passes.
+        assert_eq!(gov.get_effective_quorum(&pid), 1_700);
         gov.execute(&pid);
         assert_eq!(gov.proposal_status(&pid), ProposalStatus::Executed);
     }
@@ -2458,14 +2462,18 @@ mod tests {
         gov.vote(&lp1, &pid, &Vote::For);
 
         let proposal = gov.get_proposal(&pid);
-        // Jump 20 days from vote_start; execute_after is only ~9 days so we are past it.
-        // 20 days * 500 bps/day + 1000 base = 11000 capped at 10000.
+        // Jump 20 days from vote_start, well past vote_end (7 days) and expires_at
+        // (11 days). Decay freezes at vote_end: 7 days * 500 bps/day + 1000 base = 4500,
+        // not the 11000 (capped 10000) it would be if decay kept accruing after voting closed.
         s.env
             .ledger()
             .set_timestamp(proposal.vote_start + 20 * 86_400);
 
-        assert_eq!(gov.get_effective_quorum(&pid), 10_000);
-        assert_eq!(gov.proposal_status(&pid), ProposalStatus::Defeated);
+        assert_eq!(gov.get_effective_quorum(&pid), 4_500);
+        // Frozen quorum threshold (450) is met by the 600 votes cast, and votes_for
+        // beats votes_against, so the proposal passed quorum -- it is now Expired
+        // (never executed within the window), not Defeated.
+        assert_eq!(gov.proposal_status(&pid), ProposalStatus::Expired);
     }
 
     #[test]
