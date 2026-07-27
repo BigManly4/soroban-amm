@@ -126,7 +126,6 @@ impl IncentiveCampaigns {
             active: true,
             total_distributed: 0,
             funding_amount,
-            funding_amount,
         };
         let campaign_key = DataKey::Campaign(id);
         env.storage().persistent().set(&campaign_key, &campaign);
