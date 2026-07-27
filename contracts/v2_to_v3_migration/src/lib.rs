@@ -285,9 +285,13 @@ impl MigrationContract {
 
     /// Compute the final [tick_lower, tick_upper] for the V3 deposit.
     ///
-    /// If the caller passes explicit ticks (neither sentinel value), they are
-    /// validated and returned as-is. Otherwise the current pool tick is fetched
-    /// and a symmetric range of ±`range_width_ticks` is computed.
+    /// `tick_lower` and `tick_upper` are independently opt-in to
+    /// auto-computation, matching `migrate`'s doc comment: passing
+    /// `i32::MIN` for `tick_lower` auto-computes only the lower bound, and
+    /// passing `i32::MAX` for `tick_upper` auto-computes only the upper
+    /// bound. An explicit value for either bound is always kept as-is —
+    /// it is never silently discarded, even when the other bound is a
+    /// sentinel.
     fn compute_range(
         env: &Env,
         v3_client: &V3PoolClient,
@@ -295,24 +299,133 @@ impl MigrationContract {
         tick_upper: i32,
         range_width_ticks: i32,
     ) -> Result<(i32, i32), MigrationError> {
-        // Sentinel: caller wants auto-range.
-        let auto = tick_lower == i32::MIN || tick_upper == i32::MAX;
-        if auto {
-            if range_width_ticks <= 0 {
+        let lower_auto = tick_lower == i32::MIN;
+        let upper_auto = tick_upper == i32::MAX;
+        let _ = env; // suppress unused warning
+
+        if !lower_auto && !upper_auto {
+            // Both explicit: basic sanity check.
+            if tick_lower >= tick_upper {
                 return Err(MigrationError::InvalidRange);
             }
-            let current_tick = v3_client.get_current_tick();
-            // Align to tick spacing of 1 (V3 implementations may enforce spacing;
-            // callers should pass a width that is a multiple of their pool's spacing).
-            let lower = current_tick - range_width_ticks;
-            let upper = current_tick + range_width_ticks;
-            return Ok((lower, upper));
+            return Ok((tick_lower, tick_upper));
         }
-        // Explicit ticks: basic sanity check.
-        if tick_lower >= tick_upper {
+
+        if range_width_ticks <= 0 {
             return Err(MigrationError::InvalidRange);
         }
-        let _ = env; // suppress unused warning
-        Ok((tick_lower, tick_upper))
+        let current_tick = v3_client.get_current_tick();
+        // Align to tick spacing of 1 (V3 implementations may enforce spacing;
+        // callers should pass a width that is a multiple of their pool's spacing).
+        let lower = if lower_auto {
+            current_tick - range_width_ticks
+        } else {
+            tick_lower
+        };
+        let upper = if upper_auto {
+            current_tick + range_width_ticks
+        } else {
+            tick_upper
+        };
+        if lower >= upper {
+            return Err(MigrationError::InvalidRange);
+        }
+        Ok((lower, upper))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    /// Minimal V3 pool stub: only `get_current_tick` is needed to exercise
+    /// `compute_range` via the public `preview_range` entry point.
+    #[contract]
+    struct MockV3Pool;
+
+    #[contractimpl]
+    impl MockV3Pool {
+        pub fn get_current_tick(_env: Env) -> i32 {
+            1_000
+        }
+    }
+
+    fn setup() -> (Env, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let v2_pool = Address::generate(&env); // unused by preview_range
+        let v3_pool = env.register_contract(None, MockV3Pool);
+
+        let contract_addr = env.register_contract(None, MigrationContract);
+        MigrationContractClient::new(&env, &contract_addr).initialize(&admin, &v2_pool, &v3_pool);
+
+        (env, contract_addr)
+    }
+
+    #[test]
+    fn both_explicit_ticks_are_kept_as_is() {
+        let (env, contract_addr) = setup();
+        let client = MigrationContractClient::new(&env, &contract_addr);
+        let result = client.preview_range(&100, &200, &0);
+        assert_eq!(result, (100, 200));
+    }
+
+    #[test]
+    fn both_sentinels_auto_compute_symmetric_range() {
+        let (env, contract_addr) = setup();
+        let client = MigrationContractClient::new(&env, &contract_addr);
+        let result = client.preview_range(&i32::MIN, &i32::MAX, &50);
+        assert_eq!(result, (950, 1050));
+    }
+
+    /// Regression test for issue #478: an explicit `tick_lower` combined with
+    /// `tick_upper = i32::MAX` must auto-compute only the upper bound and
+    /// keep the caller's explicit lower bound, rather than silently
+    /// discarding it in favor of a fully symmetric range.
+    #[test]
+    fn explicit_lower_with_auto_upper_keeps_explicit_lower() {
+        let (env, contract_addr) = setup();
+        let client = MigrationContractClient::new(&env, &contract_addr);
+        let result = client.preview_range(&500, &i32::MAX, &50);
+        assert_eq!(result, (500, 1050));
+    }
+
+    /// Mirror case: auto lower bound with an explicit upper bound.
+    #[test]
+    fn auto_lower_with_explicit_upper_keeps_explicit_upper() {
+        let (env, contract_addr) = setup();
+        let client = MigrationContractClient::new(&env, &contract_addr);
+        let result = client.preview_range(&i32::MIN, &1500, &50);
+        assert_eq!(result, (950, 1500));
+    }
+
+    #[test]
+    fn partial_auto_range_rejects_non_positive_width() {
+        let (env, contract_addr) = setup();
+        let client = MigrationContractClient::new(&env, &contract_addr);
+        let result = client.try_preview_range(&500, &i32::MAX, &0);
+        assert_eq!(result, Err(Ok(MigrationError::InvalidRange)));
+    }
+
+    #[test]
+    fn partial_auto_range_rejects_inverted_result() {
+        let (env, contract_addr) = setup();
+        let client = MigrationContractClient::new(&env, &contract_addr);
+        // Explicit lower (2000) ends up above the auto-computed upper
+        // (current_tick + 50 = 1050); this must be rejected, not silently
+        // deposited into an inverted/degenerate range.
+        let result = client.try_preview_range(&2_000, &i32::MAX, &50);
+        assert_eq!(result, Err(Ok(MigrationError::InvalidRange)));
+    }
+
+    #[test]
+    fn explicit_ticks_reject_inverted_range() {
+        let (env, contract_addr) = setup();
+        let client = MigrationContractClient::new(&env, &contract_addr);
+        let result = client.try_preview_range(&200, &100, &0);
+        assert_eq!(result, Err(Ok(MigrationError::InvalidRange)));
     }
 }
