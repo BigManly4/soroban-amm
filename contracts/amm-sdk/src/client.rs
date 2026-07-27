@@ -72,10 +72,10 @@ pub trait AmmPoolInterface {
     fn flash_loan(
         env: Env,
         receiver: Address,
-        token: Address,
-        amount: i128,
+        amount_a: i128,
+        amount_b: i128,
         data: Bytes,
-    ) -> Result<i128, SdkAmmError>;
+    ) -> Result<(i128, i128), SdkAmmError>;
 
     fn get_amount_out(env: Env, token_in: Address, amount_in: i128) -> Result<i128, SdkAmmError>;
     fn get_amount_in(env: Env, token_out: Address, amount_out: i128) -> i128;
@@ -397,12 +397,12 @@ impl<'a> AmmPoolSdk<'a> {
     pub fn flash_loan(
         &self,
         receiver: &Address,
-        token: &Address,
-        amount: i128,
+        amount_a: i128,
+        amount_b: i128,
         data: Bytes,
-    ) -> Result<i128, SdkAmmError> {
+    ) -> Result<(i128, i128), SdkAmmError> {
         Ok(self.client
-            .flash_loan(receiver, token, &amount, &data))
+            .flash_loan(receiver, &amount_a, &amount_b, &data))
     }
 }
 
