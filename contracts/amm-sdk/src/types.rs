@@ -29,29 +29,35 @@ use soroban_sdk::{contracterror, contracttype, Address};
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SdkAmmError {
-    AlreadyInitialized    = 1,
-    InvalidFeeBps         = 2,
-    InsufficientShares    = 3,
-    DeadlineExceeded      = 4,
-    SlippageExceeded      = 5,
-    Paused                = 6,
-    Unauthorized          = 7,
-    ZeroAmount            = 8,
-    InvalidToken          = 9,
-    EmptyPool             = 10,
+    AlreadyInitialized = 1,
+    InvalidFeeBps = 2,
+    InsufficientShares = 3,
+    DeadlineExceeded = 4,
+    SlippageExceeded = 5,
+    Paused = 6,
+    Unauthorized = 7,
+    ZeroAmount = 8,
+    InvalidToken = 9,
+    EmptyPool = 10,
     InsufficientLiquidity = 11,
-    NoPendingAdmin        = 12,
-    WrongAdmin            = 13,
-    Reentrant             = 14,
-    CircuitBreaker        = 15,
+    NoPendingAdmin = 12,
+    WrongAdmin = 13,
+    Reentrant = 14,
+    CircuitBreaker = 15,
 }
 
 // ── Pool state ────────────────────────────────────────────────────────────────
 
 /// Full snapshot of an AMM pool's state returned by `get_info`.
+///
+/// This mirrors the on-chain `PoolInfo` struct. Named `SdkPoolInfo` to avoid a
+/// duplicate-type collision in the WASM spec when the AMM contract is compiled
+/// with this SDK crate as a dependency (both would otherwise emit a `PoolInfo`
+/// entry, causing `soroban_sdk::contractimport!` to fail with a redefinition
+/// error in consumer crates such as `amm-fuzz`).
 #[contracttype]
 #[derive(Debug, Clone, PartialEq)]
-pub struct PoolInfo {
+pub struct SdkPoolInfo {
     pub token_a: Address,
     pub token_b: Address,
     pub reserve_a: i128,
@@ -65,6 +71,10 @@ pub struct PoolInfo {
     /// Issue #292: fraction of protocol fee rebated back to LP reserves (bps).
     pub lp_rebate_bps: i128,
 }
+
+/// Backward-compatible type alias so existing SDK consumers do not need to
+/// change their code.
+pub type PoolInfo = SdkPoolInfo;
 
 // ── Quote types ───────────────────────────────────────────────────────────────
 

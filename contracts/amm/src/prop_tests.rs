@@ -603,9 +603,7 @@ fn test_propose_admin_emits_event() {
     let events = env.events().all();
     let evt = events
         .iter()
-        .find(|e| {
-            e.0 == amm.address && e.1 == (Symbol::new(env, "admin_nominated"),).into_val(env)
-        })
+        .find(|e| e.0 == amm.address && e.1 == (Symbol::new(env, "admin_nominated"),).into_val(env))
         .expect("admin_nominated event not found");
 
     let __ver_2: (u32, (Address, Address)) = evt.2.into_val(env);
@@ -631,9 +629,7 @@ fn test_accept_admin_emits_event() {
     let events = env.events().all();
     let evt = events
         .iter()
-        .find(|e| {
-            e.0 == amm.address && e.1 == (Symbol::new(env, "admin_changed"),).into_val(env)
-        })
+        .find(|e| e.0 == amm.address && e.1 == (Symbol::new(env, "admin_changed"),).into_val(env))
         .expect("admin_changed event not found");
 
     let __ver_3: (u32, (Address,)) = evt.2.into_val(env);

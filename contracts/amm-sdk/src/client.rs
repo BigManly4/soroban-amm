@@ -17,6 +17,7 @@ use crate::types::{LiquidityQuote, PoolInfo, SdkAmmError, SwapInQuote, SwapOutQu
 /// Rust type-checking guarantees apply before a transaction is submitted.
 #[contractclient(name = "AmmPoolClient")]
 pub trait AmmPoolInterface {
+    #[allow(clippy::too_many_arguments)]
     fn initialize(
         env: Env,
         admin: Address,
@@ -79,7 +80,11 @@ pub trait AmmPoolInterface {
 
     fn get_amount_out(env: Env, token_in: Address, amount_in: i128) -> Result<i128, SdkAmmError>;
     fn get_amount_in(env: Env, token_out: Address, amount_out: i128) -> i128;
-    fn simulate_swap(env: Env, token_in: Address, amount_in: i128) -> Result<crate::types::PoolInfo, SdkAmmError>;
+    fn simulate_swap(
+        env: Env,
+        token_in: Address,
+        amount_in: i128,
+    ) -> Result<crate::types::PoolInfo, SdkAmmError>;
     fn price_ratio(env: Env) -> Result<(i128, i128), SdkAmmError>;
     fn get_info(env: Env) -> PoolInfo;
     fn get_accrued_fees(env: Env) -> (i128, i128);
@@ -89,10 +94,19 @@ pub trait AmmPoolInterface {
 
     fn update_fee(env: Env, new_fee_bps: i128) -> Result<(), SdkAmmError>;
     fn update_flash_loan_fee(env: Env, new_fee_bps: i128) -> Result<(), SdkAmmError>;
-    fn set_protocol_fee(env: Env, admin: Address, recipient: Address, protocol_fee_bps: i128) -> Result<(), SdkAmmError>;
+    fn set_protocol_fee(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+        protocol_fee_bps: i128,
+    ) -> Result<(), SdkAmmError>;
     fn get_protocol_fee(env: Env) -> (Option<Address>, i128);
 
-    fn propose_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), SdkAmmError>;
+    fn propose_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), SdkAmmError>;
     fn accept_admin(env: Env, new_admin: Address) -> Result<(), SdkAmmError>;
     fn get_pending_admin(env: Env) -> Option<Address>;
     fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), SdkAmmError>;
@@ -114,7 +128,7 @@ pub trait AmmPoolInterface {
 /// if quote.price_impact_bps > 100 {
 ///     return Err(MyError::TooMuchSlippage);
 /// }
-/// sdk.execute_swap(&trader, &token_a, 1_000_000, quote.amount_out * 99 / 100, deadline, None)?;
+/// sdk.execute_swap(&trader, &token_a, 1_000_000, quote.amount_out * 99 / 100, deadline)?;
 /// ```
 pub struct AmmPoolSdk<'a> {
     client: AmmPoolClient<'a>,
@@ -335,13 +349,9 @@ impl<'a> AmmPoolSdk<'a> {
         min_out: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client.swap(
-            trader,
-            token_in,
-            &amount_in,
-            &min_out,
-            &deadline,
-        ))
+        Ok(self
+            .client
+            .swap(trader, token_in, &amount_in, &min_out, &deadline))
     }
 
     /// Execute a swap targeting an exact output amount.
@@ -353,13 +363,9 @@ impl<'a> AmmPoolSdk<'a> {
         max_in: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client.swap_exact_out(
-            trader,
-            token_out,
-            &amount_out,
-            &max_in,
-            &deadline,
-        ))
+        Ok(self
+            .client
+            .swap_exact_out(trader, token_out, &amount_out, &max_in, &deadline))
     }
 
     /// Add liquidity to the pool.
@@ -371,13 +377,9 @@ impl<'a> AmmPoolSdk<'a> {
         min_shares: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client.add_liquidity(
-            provider,
-            &amount_a,
-            &amount_b,
-            &min_shares,
-            &deadline,
-        ))
+        Ok(self
+            .client
+            .add_liquidity(provider, &amount_a, &amount_b, &min_shares, &deadline))
     }
 
     /// Remove liquidity from the pool.
@@ -389,7 +391,8 @@ impl<'a> AmmPoolSdk<'a> {
         min_b: i128,
         deadline: u64,
     ) -> Result<(i128, i128), SdkAmmError> {
-        Ok(self.client
+        Ok(self
+            .client
             .remove_liquidity(provider, &shares, &min_a, &min_b, &deadline))
     }
 

@@ -307,8 +307,8 @@ fn stale_src_event_emitted_when_sources_skipped() {
     let h = deploy(&env, 60);
 
     let s1 = deploy_source(&env, 100); // healthy
-    let s2 = deploy_source(&env, 0);   // price=0 → skipped
-    let s3 = deploy_source(&env, 0);   // price=0 → skipped
+    let s2 = deploy_source(&env, 0); // price=0 → skipped
+    let s3 = deploy_source(&env, 0); // price=0 → skipped
 
     h.aggregator
         .register_source(&h.admin, &s1, &OracleSourceType::AmmTwap);
@@ -345,7 +345,10 @@ fn stale_src_event_emitted_when_sources_skipped() {
 fn get_max_deviation_bps_defaults_to_constant() {
     let env = Env::default();
     let h = deploy(&env, 600);
-    assert_eq!(h.aggregator.get_max_deviation_bps(), DEFAULT_MAX_DEVIATION_BPS);
+    assert_eq!(
+        h.aggregator.get_max_deviation_bps(),
+        DEFAULT_MAX_DEVIATION_BPS
+    );
 }
 
 #[test]

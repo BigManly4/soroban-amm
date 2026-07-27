@@ -81,7 +81,10 @@ impl BatchRouter {
     ) -> Vec<BatchOpResult> {
         caller.require_auth();
         assert!(!ops.is_empty(), "empty batch");
-        assert!(ops.len() <= MAX_BATCH_OPS, "batch exceeds MAX_BATCH_OPS ceiling");
+        assert!(
+            ops.len() <= MAX_BATCH_OPS,
+            "batch exceeds MAX_BATCH_OPS ceiling"
+        );
         assert!(env.ledger().timestamp() <= deadline, "deadline expired");
 
         let mut results = Vec::new(&env);
@@ -129,13 +132,8 @@ impl BatchRouter {
                 BatchOpResult::AddLiquidity(shares)
             }
             BatchOp::RemoveLiquidity(op) => {
-                let (a, b) = AmmPoolClient::new(env, &op.pool).remove_liquidity(
-                    caller,
-                    &op.shares,
-                    &op.min_a,
-                    &op.min_b,
-                    &deadline,
-                );
+                let (a, b) = AmmPoolClient::new(env, &op.pool)
+                    .remove_liquidity(caller, &op.shares, &op.min_a, &op.min_b, &deadline);
                 BatchOpResult::RemoveLiquidity(a, b)
             }
         }
@@ -163,13 +161,7 @@ mod tests {
             &7u32,
         );
         AmmPoolClient::new(env, &amm_addr).initialize(
-            &amm_addr,
-            token_a,
-            token_b,
-            &lp_addr,
-            &30_i128,
-            &amm_addr,
-            &0_i128,
+            &amm_addr, token_a, token_b, &lp_addr, &30_i128, &amm_addr, &0_i128,
         );
         amm_addr
     }
@@ -250,13 +242,8 @@ mod tests {
         StellarAssetClient::new(&env, &ta).mint(&trader, &200_000_i128);
         StellarAssetClient::new(&env, &tb).mint(&trader, &200_000_i128);
 
-        let swap_out = AmmPoolClient::new(&env, &pool).swap(
-            &trader,
-            &ta,
-            &50_000_i128,
-            &0_i128,
-            &u64::MAX,
-        );
+        let swap_out =
+            AmmPoolClient::new(&env, &pool).swap(&trader, &ta, &50_000_i128, &0_i128, &u64::MAX);
 
         let tb_bal = StellarTokenClient::new(&env, &tb).balance(&trader);
         let ops = vec![
@@ -322,8 +309,7 @@ mod tests {
 
         let batch_addr = env.register_contract(None, BatchRouter);
         let deadline = env.ledger().timestamp() + 1000;
-        let results =
-            BatchRouterClient::new(&env, &batch_addr).execute_batch(&lp, &ops, &deadline);
+        let results = BatchRouterClient::new(&env, &batch_addr).execute_batch(&lp, &ops, &deadline);
 
         assert_eq!(results.len(), 1);
         // The actual token amounts received are reported, not the shares burned.

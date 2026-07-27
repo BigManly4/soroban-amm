@@ -2,7 +2,9 @@
 
 //! TWAL (time-weighted average liquidity) consumer contract.
 
-use soroban_sdk::{contract, contractclient, contractimpl, contracterror, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec,
+};
 
 #[contractclient(name = "AmmPoolLiquidityClient")]
 pub trait AmmPoolLiquidityOracle {
@@ -76,7 +78,10 @@ impl TwalConsumer {
         Self::require_keeper(&env)?;
         let (cum, pool_ts) = AmmPoolLiquidityClient::new(&env, &pool).get_liquidity_cumulative();
         let ledger_ts = env.ledger().timestamp();
-        let snapshot = LiquiditySnapshot { cum_liquidity: cum, pool_ts };
+        let snapshot = LiquiditySnapshot {
+            cum_liquidity: cum,
+            pool_ts,
+        };
         let key = DataKey::LiquiditySnapshot(pool.clone(), ledger_ts);
         env.storage().persistent().set(&key, &snapshot);
         env.storage().persistent().extend_ttl(
@@ -100,7 +105,7 @@ impl TwalConsumer {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(env));
-        if timestamps.last().map_or(true, |last| last != ts) {
+        if timestamps.last() != Some(ts) {
             timestamps.push_back(ts);
         }
         env.storage().persistent().set(&key, &timestamps);
@@ -180,7 +185,11 @@ impl TwalConsumer {
         );
     }
 
-    pub fn get_twal_liquidity(env: Env, pool: Address, window_seconds: u64) -> Result<i128, TwalError> {
+    pub fn get_twal_liquidity(
+        env: Env,
+        pool: Address,
+        window_seconds: u64,
+    ) -> Result<i128, TwalError> {
         if window_seconds == 0 {
             return Err(TwalError::ZeroWindow);
         }
@@ -230,7 +239,10 @@ impl TwalConsumer {
         let active = ClPoolLiquidityClient::new(&env, &pool).active_liquidity();
         let (_tick_cum, pool_ts) = ClPoolLiquidityClient::new(&env, &pool).get_tick_cumulative();
         let ledger_ts = env.ledger().timestamp();
-        let snapshot = LiquiditySnapshot { cum_liquidity: active, pool_ts };
+        let snapshot = LiquiditySnapshot {
+            cum_liquidity: active,
+            pool_ts,
+        };
         let key = DataKey::LiquiditySnapshot(pool.clone(), ledger_ts);
         env.storage().persistent().set(&key, &snapshot);
         env.storage().persistent().extend_ttl(
@@ -329,14 +341,24 @@ mod tests {
         let (ta, ta_sac) = create_sac(&env, &admin);
         let (tb, tb_sac) = create_sac(&env, &admin);
         AmmPoolClient::new(&env, &amm_addr).initialize(
-            &admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128,
+            &admin,
+            &ta.address,
+            &tb.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
         );
 
         let provider = Address::generate(&env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &1_000_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &1_000_000_i128,
+            &1_000_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let consumer = TwalConsumerClient::new(&env, &consumer_addr);
@@ -347,7 +369,11 @@ mod tests {
         ta_sac.mint(&provider, &200_000_i128);
         tb_sac.mint(&provider, &200_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &100_000_i128, &100_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &100_000_i128,
+            &100_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
         consumer.save_snapshot(&amm_addr);
 
@@ -355,7 +381,11 @@ mod tests {
         let trader = Address::generate(&env);
         ta_sac.mint(&trader, &1_000_i128);
         AmmPoolClient::new(&env, &amm_addr).swap(
-            &trader, &ta.address, &1_000_i128, &0_i128, &u64::MAX,
+            &trader,
+            &ta.address,
+            &1_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let twal = consumer.get_twal_liquidity(&amm_addr, &600);
@@ -446,14 +476,24 @@ mod tests {
         let (ta, ta_sac) = create_sac(&env, &admin);
         let (tb, tb_sac) = create_sac(&env, &admin);
         AmmPoolClient::new(&env, &amm_addr).initialize(
-            &admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128,
+            &admin,
+            &ta.address,
+            &tb.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
         );
 
         let provider = Address::generate(&env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &1_000_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &1_000_000_i128,
+            &1_000_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let consumer = TwalConsumerClient::new(&env, &consumer_addr);
@@ -496,14 +536,24 @@ mod tests {
         let (ta, ta_sac) = create_sac(&env, &admin);
         let (tb, tb_sac) = create_sac(&env, &admin);
         AmmPoolClient::new(&env, &amm_addr).initialize(
-            &admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128,
+            &admin,
+            &ta.address,
+            &tb.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
         );
 
         let provider = Address::generate(&env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &1_000_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &1_000_000_i128,
+            &1_000_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let consumer = TwalConsumerClient::new(&env, &consumer_addr);
@@ -515,7 +565,11 @@ mod tests {
         ta_sac.mint(&provider, &100_000_i128);
         tb_sac.mint(&provider, &100_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &100_000_i128, &100_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &100_000_i128,
+            &100_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
         consumer.save_snapshot(&amm_addr);
 

@@ -1059,7 +1059,15 @@ mod tests {
             &1_000_000_000_i128,
             &u64::MAX,
         );
-        client.submit_order(&good_trader, &pool, &ta, &tb, &5_000_i128, &0_i128, &u64::MAX);
+        client.submit_order(
+            &good_trader,
+            &pool,
+            &ta,
+            &tb,
+            &5_000_i128,
+            &0_i128,
+            &u64::MAX,
+        );
 
         env.ledger().set_timestamp(1031);
 
@@ -1342,7 +1350,10 @@ mod tests {
         assert_eq!(client.get_pending_orders().len(), 1);
 
         let (_pending_count, _max_orders, opened_at, _window_secs) = client.get_batch_info();
-        assert_eq!(opened_at, 1030, "BatchOpenedAt must be refreshed to timestamp of settlement");
+        assert_eq!(
+            opened_at, 1030,
+            "BatchOpenedAt must be refreshed to timestamp of settlement"
+        );
 
         // Submit another order at timestamp 1035
         env.ledger().set_timestamp(1035);
