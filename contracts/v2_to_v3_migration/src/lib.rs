@@ -215,6 +215,12 @@ impl MigrationContract {
         let tb_client = TokenClient::new(&env, &token_b);
         let contract_addr = env.current_contract_address();
 
+        // Snapshot balances before this migration's funds land, so the refund
+        // step below only ever returns the delta attributable to this call —
+        // never any balance already sitting at this shared contract address.
+        let balance_a_before = ta_client.balance(&contract_addr);
+        let balance_b_before = tb_client.balance(&contract_addr);
+
         ta_client.transfer(&provider, &contract_addr, &received_a);
         tb_client.transfer(&provider, &contract_addr, &received_b);
 
@@ -238,8 +244,11 @@ impl MigrationContract {
         );
 
         // ── Step 4: refund leftover dust to provider ──────────────────────────
-        let refund_a = ta_client.balance(&contract_addr);
-        let refund_b = tb_client.balance(&contract_addr);
+        // Computed as the call-scoped delta, not the contract's absolute
+        // balance, so pre-existing tokens at this shared address are never
+        // swept up and misattributed to this migration.
+        let refund_a = ta_client.balance(&contract_addr) - balance_a_before;
+        let refund_b = tb_client.balance(&contract_addr) - balance_b_before;
         if refund_a > 0 {
             ta_client.transfer(&contract_addr, &provider, &refund_a);
         }
@@ -316,8 +325,10 @@ impl MigrationContract {
             let current_tick = v3_client.get_current_tick();
             // Align to tick spacing of 1 (V3 implementations may enforce spacing;
             // callers should pass a width that is a multiple of their pool's spacing).
-            let lower = current_tick - range_width_ticks;
-            let upper = current_tick + range_width_ticks;
+            let lower = current_tick.checked_sub(range_width_ticks)
+                .ok_or(MigrationError::InvalidRange)?;
+            let upper = current_tick.checked_add(range_width_ticks)
+                .ok_or(MigrationError::InvalidRange)?;
             return Ok((lower, upper));
         }
         // Explicit ticks: basic sanity check.

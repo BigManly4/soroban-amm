@@ -210,6 +210,7 @@ impl LpToken {
         live_until_ledger: u32,
     ) {
         from.require_auth();
+        assert!(amount >= 0, "amount must be non-negative");
         if amount > 0 {
             assert!(
                 live_until_ledger >= env.ledger().sequence(),
@@ -566,6 +567,18 @@ mod tests {
         ts.env.ledger().with_mut(|l| l.sequence_number = 100);
         let past = ts.env.ledger().sequence() - 1;
         assert!(client.try_approve(&alice, &bob, &100_i128, &past).is_err());
+    }
+
+    #[test]
+    fn test_approve_negative_amount_panics() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        let bob = Address::generate(&ts.env);
+        let live_until = ts.env.ledger().sequence() + 100;
+        assert!(client
+            .try_approve(&alice, &bob, &-100_i128, &live_until)
+            .is_err());
     }
 
     #[test]

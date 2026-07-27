@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- **incentive_campaigns: retroactive reward gaming via flash-deposit or rate change (#425)**
+  - The old `claim_rewards` formula (`reward_rate × elapsed × lp_balance / total_supply`)
+    applied the provider's *current* LP balance to the *entire* elapsed window since campaign
+    start, allowing a late joiner to flash-deposit and claim a disproportionate share of
+    already-accrued rewards.  `set_campaign_rate` had the same flaw — changing the rate
+    silently rewrote the entire reward history.
+  - Replaced the naive formula with a **MasterChef-style per-second accumulator**
+    (`acc_reward_per_share`, scaled by `PRECISION = 1e12`) stored on the `Campaign` struct.
+    The accumulator advances by `reward_rate × Δt / total_supply` each second.  Each
+    provider stores their snapshot of the accumulator at last claim; pending rewards are
+    `lp_balance × (acc_now − acc_at_snapshot) / PRECISION`.
+  - A flash depositor who claims in the same ledger as their deposit earns essentially
+    nothing (`acc_delta ≈ 0`).  An honest LP who held since campaign start earns their
+    full time-weighted share.
+  - `set_campaign_rate` now flushes the accumulator to the current timestamp *before*
+    updating the rate, so past accruals are locked in at the old rate and only future
+    seconds use the new one.
+  - `DataKey::ProviderDebt` replaced by `DataKey::ProviderSnapshot` (stores
+    `ProviderSnapshot { acc_at_snapshot: i128 }` instead of a raw claimed amount).
+  - Two new regression tests added: `test_flash_deposit_cannot_claim_retroactive_rewards`
+    and `test_rate_change_is_not_retroactive`.
+  - Existing tests updated to account for the snapshot-init step (first `claim_rewards`
+    call sets the baseline and returns 0) and corrected expected amounts.
+
 ### Added
 - Governance contract with multi-type parameter voting (`ProposalKind` enum covering Fee, Protocol Fee, Flash Loan Fee, Transfer Admin, Pause, and Unpause), timelocks, quorum requirements, and voting power locks (#137)
 - Factory contract for deploying and registering AMM pools, featuring pool count (`get_pool_count`) and paginated pool queries (`get_pools`) (#139)

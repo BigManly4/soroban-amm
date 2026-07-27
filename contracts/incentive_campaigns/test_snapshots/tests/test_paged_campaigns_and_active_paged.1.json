@@ -1682,6 +1682,17 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "acc_reward_per_share"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "active"
                       },
                       "val": {
@@ -1698,10 +1709,29 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_amount"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 1000000
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
                         "u64": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "last_update_time"
+                      },
+                      "val": {
+                        "u64": 1000
                       }
                     },
                     {
@@ -1806,6 +1836,17 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "acc_reward_per_share"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "active"
                       },
                       "val": {
@@ -1822,10 +1863,29 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_amount"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 1000000
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
                         "u64": 2
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "last_update_time"
+                      },
+                      "val": {
+                        "u64": 1000
                       }
                     },
                     {
@@ -1930,6 +1990,17 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "acc_reward_per_share"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "active"
                       },
                       "val": {
@@ -1946,10 +2017,29 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_amount"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 1000000
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
                         "u64": 3
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "last_update_time"
+                      },
+                      "val": {
+                        "u64": 4000
                       }
                     },
                     {
@@ -5069,6 +5159,17 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "acc_reward_per_share"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "active"
                       },
                       "val": {
@@ -5085,10 +5186,29 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_amount"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 1000000
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
                         "u64": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "last_update_time"
+                      },
+                      "val": {
+                        "u64": 1000
                       }
                     },
                     {
@@ -5151,6 +5271,17 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "acc_reward_per_share"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "active"
                       },
                       "val": {
@@ -5167,10 +5298,29 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_amount"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 1000000
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
                         "u64": 2
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "last_update_time"
+                      },
+                      "val": {
+                        "u64": 1000
                       }
                     },
                     {
