@@ -232,7 +232,7 @@ impl ConcentratedLiquidity {
         if token_a == token_b {
             return Err(ClError::TokensMustDiffer);
         }
-        if !(0..=10_000).contains(&fee_bps) {
+        if !(0..10_000).contains(&fee_bps) {
             return Err(ClError::InvalidFeeBps);
         }
         if !(MIN_TICK..=MAX_TICK).contains(&initial_tick) {
