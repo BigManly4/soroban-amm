@@ -555,6 +555,7 @@ impl ConcentratedLiquidity {
             return Err(ClError::Paused);
         }
         provider.require_auth();
+        Self::ensure_legacy_owner(&env, &provider, lower_tick, upper_tick)?;
         if lower_tick >= upper_tick {
             return Err(ClError::TickOutOfRange);
         }
@@ -710,6 +711,7 @@ impl ConcentratedLiquidity {
             return Err(ClError::Paused);
         }
         provider.require_auth();
+        Self::ensure_legacy_owner(&env, &provider, lower_tick, upper_tick)?;
         if lower_tick >= upper_tick {
             return Err(ClError::TickOutOfRange);
         }
@@ -5871,6 +5873,46 @@ mod test_single_token_deposit {
             f.client.position_token_id(&f.alice, &f.lower, &f.upper),
             None
         );
+    }
+
+    #[test]
+    fn legacy_provider_mutation_rejected_after_transfer() {
+        let env = Env::default();
+        let f = setup_with_nft(&env);
+        let bob = Address::generate(&env);
+        f.nft.transfer(&f.alice, &f.alice, &bob, &0_u64);
+
+        let mint_err = f
+            .client
+            .try_mint_position(
+                &f.alice,
+                &f.lower,
+                &f.upper,
+                &10_000_i128,
+                &10_000_i128,
+                &0_i128,
+                &0_i128,
+            )
+            .err()
+            .unwrap()
+            .unwrap();
+        assert_eq!(mint_err, ClError::NotNftOwner);
+
+        let modify_err = f
+            .client
+            .try_modify_position(
+                &f.alice,
+                &f.lower,
+                &f.upper,
+                &1_000_i128,
+                &0_i128,
+                &0_i128,
+                &u64::MAX,
+            )
+            .err()
+            .unwrap()
+            .unwrap();
+        assert_eq!(modify_err, ClError::NotNftOwner);
     }
 
     #[test]
