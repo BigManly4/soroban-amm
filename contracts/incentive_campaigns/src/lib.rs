@@ -126,6 +126,7 @@ impl IncentiveCampaigns {
             active: true,
             total_distributed: 0,
             funding_amount,
+            funding_amount,
         };
         let campaign_key = DataKey::Campaign(id);
         env.storage().persistent().set(&campaign_key, &campaign);
@@ -176,6 +177,9 @@ impl IncentiveCampaigns {
     /// Transfers the difference between the original `funding_amount` and what was
     /// actually distributed (`total_distributed`) back to `recipient`. After recovery
     /// the campaign is marked **inactive** so no further LP claims can be made.
+    /// Transfers the difference between the original `funding_amount` and what was
+    /// actually distributed (`total_distributed`) back to `recipient`. After recovery
+    /// the campaign is marked **inactive** so no further LP claims can be made.
     ///
     /// Governance should allow a reasonable grace period after `end_time` before calling
     /// this function so that LPs have an opportunity to claim their earned rewards first.
@@ -200,6 +204,7 @@ impl IncentiveCampaigns {
         let now = env.ledger().timestamp();
         assert!(now > campaign.end_time, "campaign not yet ended");
 
+        let leftover = campaign.funding_amount - campaign.total_distributed;
         let leftover = campaign.funding_amount - campaign.total_distributed;
 
         assert!(leftover > 0, "no leftover funds to recover");
@@ -593,6 +598,7 @@ mod tests {
         let treasury = Address::generate(&env);
 
         // Campaign: t=1_000..5_000, rate=100, funding=1_000_000.
+        // Campaign: t=1_000..5_000, rate=100, funding=1_000_000.
         let id = client.create_campaign(
             &gov_addr, &pool, &lp, &reward, &1_000, &5_000, &100, &1_000_000,
         );
@@ -609,7 +615,10 @@ mod tests {
 
         // Governance recovers the unclaimed remainder: funding_amount - total_distributed
         // = 1_000_000 - 99_900 = 900_100.
+        // Governance recovers the unclaimed remainder: funding_amount - total_distributed
+        // = 1_000_000 - 99_900 = 900_100.
         let recovered = client.recover_leftover_funds(&gov_addr, &id, &treasury);
+        assert_eq!(recovered, 900_100, "should recover unclaimed rewards");
         assert_eq!(recovered, 900_100, "should recover unclaimed rewards");
 
         // After recovery the campaign is inactive; LP cannot claim any more.
@@ -618,6 +627,7 @@ mod tests {
             "claim after recovery must fail (campaign inactive)"
         );
 
+        // ── Case 2: no claims at all → governance recovers the full funding_amount ──
         // ── Case 2: no claims at all → governance recovers the full funding_amount ──
         let id2 = client.create_campaign(
             &gov_addr, &pool, &lp, &reward, &1_000, &5_000, &100, &1_000_000,
