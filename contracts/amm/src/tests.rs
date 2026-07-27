@@ -1755,3 +1755,170 @@ fn bench_add_liquidity_cost() {
     std::println!("=== ADD_LIQ BUDGET ===");
     std::println!("{}", env.budget());
 }
+
+// ── add_liquidity_fot minimum-liquidity lock ─────────────────────────────────
+
+/// First deposit via add_liquidity_fot must lock MINIMUM_LIQUIDITY shares
+/// to the contract, matching add_liquidity's behavior (Issue #294).
+#[test]
+fn test_fot_first_deposit_locks_minimum_liquidity() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &admin,
+        &0_i128,
+    );
+
+    let provider = Address::generate(&env);
+    let ta_sac = StellarAssetClient::new(&env, &ta.address);
+    let tb_sac = StellarAssetClient::new(&env, &tb.address);
+    ta_sac.mint(&provider, &2_000_000);
+    tb_sac.mint(&provider, &2_000_000);
+
+    // First FOT deposit: amount_a=2_000_000, amount_b=2_000_000.
+    // sqrt(2_000_000 * 2_000_000) = 2_000_000 shares.
+    // After MINIMUM_LIQUIDITY lock, provider gets 2_000_000 - 1_000 = 1_999_000.
+    let shares = amm
+        .try_add_liquidity_fot(
+            &provider,
+            &2_000_000,
+            &2_000_000,
+            &0,
+            &0,
+            &0,
+            &u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(shares, 1_999_000);
+
+    let info = amm.get_info();
+    // Total shares = provider shares + locked 1_000.
+    assert_eq!(info.total_shares, 2_000_000);
+    // Locked 1_000 are held by the contract.
+    let lp_client = token::LpTokenClient::new(&env, &lp_addr);
+    assert_eq!(lp_client.balance(&amm_addr), 1_000);
+    assert_eq!(lp_client.balance(&provider), 1_999_000);
+}
+
+/// First deposit where shares <= MINIMUM_LIQUIDITY must be rejected.
+#[test]
+fn test_fot_first_deposit_rejects_insufficient_shares() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &admin,
+        &0_i128,
+    );
+
+    let provider = Address::generate(&env);
+    let ta_sac = StellarAssetClient::new(&env, &ta.address);
+    let tb_sac = StellarAssetClient::new(&env, &tb.address);
+    // sqrt(1_000 * 1_000) = 1_000 shares → equal to MINIMUM_LIQUIDITY → rejected.
+    ta_sac.mint(&provider, &1_000);
+    tb_sac.mint(&provider, &1_000);
+    let result = amm.try_add_liquidity_fot(
+        &provider,
+        &1_000,
+        &1_000,
+        &0,
+        &0,
+        &0,
+        &u64::MAX,
+    );
+    assert_eq!(result, Err(Ok(AmmError::InsufficientShares)));
+
+    // Even smaller: sqrt(500 * 500) = 500 → rejected.
+    let provider2 = Address::generate(&env);
+    ta_sac.mint(&provider2, &500);
+    tb_sac.mint(&provider2, &500);
+    let result2 = amm.try_add_liquidity_fot(
+        &provider2,
+        &500,
+        &500,
+        &0,
+        &0,
+        &0,
+        &u64::MAX,
+    );
+    assert_eq!(result2, Err(Ok(AmmError::InsufficientShares)));
+}
+
+/// Subsequent deposits via add_liquidity_fot must not lock additional liquidity.
+#[test]
+fn test_fot_subsequent_deposit_no_extra_lock() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &admin,
+        &0_i128,
+    );
+
+    let provider = Address::generate(&env);
+    let ta_sac = StellarAssetClient::new(&env, &ta.address);
+    let tb_sac = StellarAssetClient::new(&env, &tb.address);
+    ta_sac.mint(&provider, &2_000_000);
+    tb_sac.mint(&provider, &2_000_000);
+
+    // First deposit locks MINIMUM_LIQUIDITY.
+    let shares1 = amm
+        .try_add_liquidity_fot(
+            &provider,
+            &2_000_000,
+            &2_000_000,
+            &0,
+            &0,
+            &0,
+            &u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(shares1, 1_999_000);
+
+    // Second deposit: proportional, no additional lock.
+    ta_sac.mint(&provider, &1_000_000);
+    tb_sac.mint(&provider, &1_000_000);
+    let shares2 = amm
+        .try_add_liquidity_fot(
+            &provider,
+            &1_000_000,
+            &1_000_000,
+            &0,
+            &0,
+            &0,
+            &u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+
+    let info = amm.get_info();
+    let lp_client = token::LpTokenClient::new(&env, &lp_addr);
+
+    // Contract still holds exactly 1_000 locked shares.
+    assert_eq!(lp_client.balance(&amm_addr), 1_000);
+    // Provider's total balance = 1_999_000 + second deposit shares.
+    assert_eq!(lp_client.balance(&provider), shares1 + shares2);
+    // Total shares = provider total + 1_000 lock.
+    assert_eq!(info.total_shares, shares1 + shares2 + 1_000);
+}
