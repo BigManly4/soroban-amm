@@ -218,8 +218,12 @@ impl MigrationContract {
         tb_client.transfer(&provider, &contract_addr, &received_b);
 
         // Approve V3 pool to pull from this contract.
-        ta_client.approve(&contract_addr, &v3_pool, &received_a, &200u32);
-        tb_client.approve(&contract_addr, &v3_pool, &received_b, &200u32);
+        // live_until_ledger must be >= current ledger sequence when amount > 0.
+        // Adding a small lookahead is sufficient because the approval is consumed
+        // in the very next call (add_liquidity_range) within the same transaction.
+        let approve_expiry = env.ledger().sequence() + 100;
+        ta_client.approve(&contract_addr, &v3_pool, &received_a, &approve_expiry);
+        tb_client.approve(&contract_addr, &v3_pool, &received_b, &approve_expiry);
 
         let position_id = v3_client.add_liquidity_range(
             &contract_addr,
