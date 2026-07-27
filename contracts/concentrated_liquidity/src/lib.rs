@@ -2447,27 +2447,14 @@ impl ConcentratedLiquidity {
         (inside_a, inside_b)
     }
 
+    /// Computes `PRICE_SCALE * 1.0001^tick` via binary exponentiation (O(log|tick|)
+    /// multiplications), supporting the full [MIN_TICK, MAX_TICK] range. Delegates
+    /// to `tick_to_price_bexp`, which uses saturating arithmetic to prevent panics
+    /// at extreme ticks.
     pub fn tick_to_price(tick: i32) -> i128 {
-        if tick == 0 {
-            return 1_000_000;
-        }
-        let abs_tick = tick.unsigned_abs() as i128;
-        let iters = abs_tick.min(300);
-        let mut price = 1_000_000_i128;
-        for _ in 0..iters {
-            price = price * 1_000_100 / 1_000_000;
-        }
-        if tick < 0 {
-            price = 1_000_000 * 1_000_000 / price;
-        }
-        price
+        Self::tick_to_price_bexp(tick)
     }
 
-    /// Binary-exponentiation variant of `tick_to_price`.
-    ///
-    /// Computes `PRICE_SCALE * 1.0001^tick` in O(log|tick|) multiplications,
-    /// supporting the full tick range without the 300-iteration cap.
-    /// Uses saturating arithmetic to prevent panics at extreme ticks.
     fn tick_to_price_bexp(tick: i32) -> i128 {
         if tick == 0 {
             return PRICE_SCALE;
@@ -2997,8 +2984,8 @@ impl ConcentratedLiquidity {
     fn price_to_tick(sqrt_p: u128) -> i32 {
         let sqrt_p_scaled = ((sqrt_p * 1000) >> 96) as i128;
         let target_price = sqrt_p_scaled * sqrt_p_scaled;
-        let mut low = -300_i32;
-        let mut high = 300_i32;
+        let mut low = MIN_TICK;
+        let mut high = MAX_TICK;
         let mut best_tick = 0_i32;
         let mut min_diff = i128::MAX;
 
