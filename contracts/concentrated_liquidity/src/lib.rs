@@ -1398,6 +1398,11 @@ impl ConcentratedLiquidity {
             }
             env.storage().persistent().set(&list_key, &new_list);
             Self::bump_position(&env, &list_key);
+
+            let range_order_key = DataKey::RangeOrder(provider.clone(), lower_tick, upper_tick);
+            if env.storage().instance().has(&range_order_key) {
+                env.storage().instance().remove(&range_order_key);
+            }
         }
 
         let fg_a: i128 = env
@@ -1614,6 +1619,11 @@ impl ConcentratedLiquidity {
         env.storage()
             .instance()
             .remove(&DataKey::NftTokenToPosition(token_id));
+        env.storage().instance().remove(&DataKey::RangeOrder(
+            provider.clone(),
+            lower_tick,
+            upper_tick,
+        ));
     }
 
     pub fn get_position(
@@ -6275,5 +6285,47 @@ mod test_range_order_fill_status {
             client.check_range_order_filled(&provider, &100_i32, &200_i32),
             RangeOrderStatus::Filled
         );
+    }
+
+    #[test]
+    fn closed_range_order_clears_stale_tag_for_later_plain_position() {
+        let env = Env::default();
+        let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
+
+        let result = client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        let liquidity = result.liquidity;
+        client.burn_position(&provider, &100_i32, &200_i32, &liquidity);
+
+        let err = client
+            .try_check_range_order_filled(&provider, &100_i32, &200_i32)
+            .err()
+            .unwrap()
+            .unwrap();
+        assert_eq!(err, ClError::PositionNotFound);
+
+        client.mint_position(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &10_000_i128,
+            &10_000_i128,
+            &0_i128,
+            &0_i128,
+        );
+
+        let status = client
+            .try_check_range_order_filled(&provider, &100_i32, &200_i32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(status, ClError::PositionNotFound);
     }
 }
