@@ -1,8 +1,15 @@
 //! Liquidity reserve management contract.
 //!
 //! Tracks protocol-wide minimum liquidity requirements for pool pairs and
-//! exposes a `check_reserves` guard that other contracts can call before
-//! processing withdrawals or rebalancing operations.
+//! exposes a `check_reserves` read-only gate for **off-chain callers**.
+//! The contract is **not** wired into `amm::remove_liquidity` /
+//! `amm::remove_liquidity_one_sided`; `set_min_reserve` minimums are not
+//! enforced on any on-chain withdrawal path. Off-chain dashboards, bots,
+//! multisig governance, and migration scripts should invoke
+//! `check_reserves(pool)` against any candidate pool before triggering a
+//! rebalance or migration; the return value determines whether to proceed,
+//! retry, or alert. The on-chain AMM hookup is deferred to a follow-up;
+//! see issue #518.
 //!
 //! Governance is a single address that may update requirements. The address
 //! can be a multisig or DAO contract for on-chain governance.
@@ -11,7 +18,11 @@
 //!   1. Deploy this contract.
 //!   2. Call `initialize` with the governance address and the factory address.
 //!   3. Governance calls `set_min_reserve` to configure per-pair requirements.
-//!   4. Any caller uses `check_reserves` to verify a pool is compliant.
+//!   4. **Off-chain** callers query `check_reserves(pool)` to gate actions
+//!      that take liquidity out of the pool (rebalance, migration, ...).
+//!      The AMM itself does **not** call this contract on-chain; integrating
+//!      pool exits with minimum guards is the responsibility of callers
+//!      (off-chain bots, multisig governance, the off-chain router).
 //!   5. Governance may call `propose_governance` / `accept_governance` to
 //!      securely hand off control.
 
