@@ -480,6 +480,75 @@ fn test_set_protocol_fee_rejects_full_capture() {
     );
 }
 
+/// update_fee must reject values equal to or below protocol_fee_bps,
+/// matching set_protocol_fee's strict-less-than invariant.
+#[test]
+fn test_update_fee_rejects_equal_or_below_protocol_fee() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let fee_recipient = Address::generate(&env);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    // fee_bps = 30, protocol_fee = 10
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &fee_recipient,
+        &10_i128,
+    );
+
+    // Values above protocol_fee_bps (10) are valid.
+    let ok = amm.try_update_fee(&11_i128);
+    assert!(ok.is_ok(), "fee_bps > protocol_fee_bps must be accepted");
+    assert_eq!(amm.get_fee_bps(), 11);
+
+    // Re-set to 30 for the next checks.
+    amm.update_fee(&30_i128);
+
+    // Equal to protocol_fee_bps (10) must be rejected (the bug fix).
+    let result = amm.try_update_fee(&10_i128);
+    assert!(
+        result.is_err(),
+        "fee_bps == protocol_fee_bps must be rejected"
+    );
+
+    // Below protocol_fee_bps must be rejected.
+    let result2 = amm.try_update_fee(&9_i128);
+    assert!(
+        result2.is_err(),
+        "fee_bps < protocol_fee_bps must be rejected"
+    );
+}
+
+/// When protocol_fee is 0 (disabled), update_fee with any valid fee succeeds.
+#[test]
+fn test_update_fee_works_with_zero_protocol_fee() {
+    let (env, admin, amm_addr, lp_addr, _) = setup();
+    let (ta, _) = create_sac(&env, &admin);
+    let (tb, _) = create_sac(&env, &admin);
+    let fee_recipient = Address::generate(&env);
+    let amm = AmmPoolClient::new(&env, &amm_addr);
+    // fee_bps = 30, protocol_fee = 0 (disabled)
+    amm.initialize(
+        &admin,
+        &ta.address,
+        &tb.address,
+        &lp_addr,
+        &30_i128,
+        &fee_recipient,
+        &0_i128,
+    );
+
+    // Both zero is valid.
+    assert!(amm.try_update_fee(&0_i128).is_ok(), "fee_bps=0 with protocol_fee=0 must be accepted");
+
+    // Setting fee to any valid value when protocol is disabled is fine.
+    assert!(amm.try_update_fee(&50_i128).is_ok(), "fee_bps=50 with protocol_fee=0 must be accepted");
+}
+
 #[test]
 fn test_add_and_swap() {
     let ts = setup_pool(30);
