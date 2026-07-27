@@ -29,21 +29,21 @@ use soroban_sdk::{contracterror, contracttype, Address};
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SdkAmmError {
-    AlreadyInitialized    = 1,
-    InvalidFeeBps         = 2,
-    InsufficientShares    = 3,
-    DeadlineExceeded      = 4,
-    SlippageExceeded      = 5,
-    Paused                = 6,
-    Unauthorized          = 7,
-    ZeroAmount            = 8,
-    InvalidToken          = 9,
-    EmptyPool             = 10,
+    AlreadyInitialized = 1,
+    InvalidFeeBps = 2,
+    InsufficientShares = 3,
+    DeadlineExceeded = 4,
+    SlippageExceeded = 5,
+    Paused = 6,
+    Unauthorized = 7,
+    ZeroAmount = 8,
+    InvalidToken = 9,
+    EmptyPool = 10,
     InsufficientLiquidity = 11,
-    NoPendingAdmin        = 12,
-    WrongAdmin            = 13,
-    Reentrant             = 14,
-    CircuitBreaker        = 15,
+    NoPendingAdmin = 12,
+    WrongAdmin = 13,
+    Reentrant = 14,
+    CircuitBreaker = 15,
 }
 
 // ── Pool state ────────────────────────────────────────────────────────────────

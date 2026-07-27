@@ -207,13 +207,7 @@ impl DexAggregator {
             .instance()
             .get(&DataKey::MaxHops)
             .unwrap_or(Self::DEFAULT_MAX_HOPS);
-        let quote = Self::find_best_route(
-            env.clone(),
-            token_in,
-            token_out,
-            amount_in,
-            max_hops,
-        )?;
+        let quote = Self::find_best_route(env.clone(), token_in, token_out, amount_in, max_hops)?;
         let deadline = env.ledger().timestamp() + 3600;
         Self::execute_route(env, quote, trader, amount_in, min_out, deadline)
     }
@@ -349,17 +343,21 @@ impl DexAggregator {
             let hop = hops.get(i).unwrap();
             let hop_min = if i == last { min_out } else { 0 };
             current = match hop.pool_kind {
-                PoolKind::Amm => AmmPoolClient::new(env, &hop.pool)
-                    .swap(trader, &hop.token_in, &current, &hop_min, &deadline),
-                PoolKind::Cl => ClPoolClient::new(env, &hop.pool)
-                    .swap(
-                        trader,
-                        &hop.zero_for_one,
-                        &current,
-                        &0u128,
-                        &hop_min,
-                        &deadline,
-                    ),
+                PoolKind::Amm => AmmPoolClient::new(env, &hop.pool).swap(
+                    trader,
+                    &hop.token_in,
+                    &current,
+                    &hop_min,
+                    &deadline,
+                ),
+                PoolKind::Cl => ClPoolClient::new(env, &hop.pool).swap(
+                    trader,
+                    &hop.zero_for_one,
+                    &current,
+                    &0u128,
+                    &hop_min,
+                    &deadline,
+                ),
             };
         }
         Ok(current)
@@ -405,7 +403,8 @@ impl DexAggregator {
             if !(Self::is_cl_pool_match(&info, token_in, token_out)) {
                 continue;
             }
-            if let Some((out, zfo)) = Self::quote_cl(env, &info.pool, token_in, token_out, amount_in)
+            if let Some((out, zfo)) =
+                Self::quote_cl(env, &info.pool, token_in, token_out, amount_in)
             {
                 if out > best {
                     best = out;
@@ -423,9 +422,7 @@ impl DexAggregator {
         for fee_idx in 0..3 {
             let fee = Self::CL_FEE_TIERS[fee_idx as usize];
             if let Some(cl) = factory.get_cl_pool(token_in, token_out, &fee) {
-                if let Some((out, zfo)) =
-                    Self::quote_cl(env, &cl, token_in, token_out, amount_in)
-                {
+                if let Some((out, zfo)) = Self::quote_cl(env, &cl, token_in, token_out, amount_in) {
                     if out > best {
                         best = out;
                         hop = RouteHop {
@@ -566,7 +563,11 @@ mod tests {
         let factory_addr = env.register_contract(None, Factory);
         let factory = FactoryClient::new(&env, &factory_addr);
         let admin = Address::generate(&env);
-        factory.initialize(&admin, &BytesN::from_array(&env, &[0u8; 32]), &BytesN::from_array(&env, &[1u8; 32]));
+        factory.initialize(
+            &admin,
+            &BytesN::from_array(&env, &[0u8; 32]),
+            &BytesN::from_array(&env, &[1u8; 32]),
+        );
 
         let agg_addr = env.register_contract(None, DexAggregator);
         let agg = DexAggregatorClient::new(&env, &agg_addr);

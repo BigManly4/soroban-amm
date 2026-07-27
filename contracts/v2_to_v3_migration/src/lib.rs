@@ -14,23 +14,23 @@
 
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractclient, contractimpl, contracterror, contracttype, Address, Env,
-};
 use soroban_sdk::token::Client as TokenClient;
+use soroban_sdk::{
+    contract, contractclient, contracterror, contractimpl, contracttype, Address, Env,
+};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MigrationError {
-    NotInitialized    = 1,
+    NotInitialized = 1,
     AlreadyInitialized = 2,
-    Unauthorized      = 3,
-    ZeroShares        = 4,
-    InvalidRange      = 5,
-    SlippageExceeded  = 6,
-    MigrationFailed   = 7,
+    Unauthorized = 3,
+    ZeroShares = 4,
+    InvalidRange = 5,
+    SlippageExceeded = 6,
+    MigrationFailed = 7,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -80,6 +80,7 @@ pub struct V2PoolInfo {
 pub trait V3PoolInterface {
     /// Add liquidity within a price range [tick_lower, tick_upper].
     /// Returns the LP NFT position ID minted to `provider`.
+    #[allow(clippy::too_many_arguments)]
     fn add_liquidity_range(
         env: Env,
         provider: Address,
@@ -251,7 +252,14 @@ impl MigrationContract {
 
         env.events().publish(
             (soroban_sdk::Symbol::new(&env, "migrated"), provider.clone()),
-            (v2_shares, deposited_a, deposited_b, position_id, refund_a, refund_b),
+            (
+                v2_shares,
+                deposited_a,
+                deposited_b,
+                position_id,
+                refund_a,
+                refund_b,
+            ),
         );
 
         Ok(MigrationResult {
