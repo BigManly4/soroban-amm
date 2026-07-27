@@ -6,6 +6,15 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 use amm::AmmPoolClient;
+use factory::FactoryClient;
+
+const MIN_TTL: u32 = 172_800;
+const BUMP_TO: u32 = 518_400;
+
+#[contracttype]
+pub enum DataKey {
+    Factory,
+}
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -69,6 +78,15 @@ pub struct BatchRouter;
 
 #[contractimpl]
 impl BatchRouter {
+    /// Initialize the router with the factory that tracks all deployed pools.
+    pub fn initialize(env: Env, factory: Address) {
+        assert!(
+            !env.storage().instance().has(&DataKey::Factory),
+            "already initialized"
+        );
+        env.storage().instance().set(&DataKey::Factory, &factory);
+    }
+
     /// Execute a sequence of AMM operations atomically.
     ///
     /// All operations share one `deadline` and a single `caller` authorization.
@@ -79,6 +97,7 @@ impl BatchRouter {
         ops: Vec<BatchOp>,
         deadline: u64,
     ) -> Vec<BatchOpResult> {
+        env.storage().instance().extend_ttl(MIN_TTL, BUMP_TO);
         caller.require_auth();
         assert!(!ops.is_empty(), "empty batch");
         assert!(
@@ -87,10 +106,13 @@ impl BatchRouter {
         );
         assert!(env.ledger().timestamp() <= deadline, "deadline expired");
 
+        let factory: Address = env.storage().instance().get(&DataKey::Factory).unwrap();
+        let factory_client = FactoryClient::new(&env, &factory);
+
         let mut results = Vec::new(&env);
         for i in 0..ops.len() {
             let op = ops.get(i).unwrap();
-            let result = Self::execute_op(&env, &caller, &op, deadline);
+            let result = Self::execute_op(&env, &caller, &op, deadline, &factory_client);
             results.push_back(result);
         }
 
@@ -109,7 +131,23 @@ impl BatchRouter {
         (ops_len, 1)
     }
 
-    fn execute_op(env: &Env, caller: &Address, op: &BatchOp, deadline: u64) -> BatchOpResult {
+    fn execute_op(
+        env: &Env,
+        caller: &Address,
+        op: &BatchOp,
+        deadline: u64,
+        factory_client: &FactoryClient,
+    ) -> BatchOpResult {
+        let pool = match op {
+            BatchOp::Swap(o) => &o.pool,
+            BatchOp::AddLiquidity(o) => &o.pool,
+            BatchOp::RemoveLiquidity(o) => &o.pool,
+        };
+        assert!(
+            factory_client.get_pool_tokens(pool).is_some(),
+            "unrecognized pool"
+        );
+
         match op {
             BatchOp::Swap(op) => {
                 let amount_out = AmmPoolClient::new(env, &op.pool).swap(
@@ -144,6 +182,7 @@ impl BatchRouter {
 mod tests {
     use super::*;
     use amm::AmmPool;
+    use factory::{Factory, FactoryClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::{StellarAssetClient, TokenClient as StellarTokenClient},
@@ -151,22 +190,18 @@ mod tests {
     };
     use token::{LpToken, LpTokenClient};
 
-    fn deploy_pool(env: &Env, token_a: &Address, token_b: &Address) -> Address {
-        let amm_addr = env.register_contract(None, AmmPool);
-        let lp_addr = env.register_contract(None, LpToken);
-        LpTokenClient::new(env, &lp_addr).initialize(
-            &amm_addr,
-            &String::from_str(env, "LP"),
-            &String::from_str(env, "LP"),
-            &7u32,
-        );
-        AmmPoolClient::new(env, &amm_addr).initialize(
-            &amm_addr, token_a, token_b, &lp_addr, &30_i128, &amm_addr, &0_i128,
-        );
-        amm_addr
+    fn setup_env_and_factory(env: &Env) -> Address {
+        let admin = Address::generate(env);
+        env.budget().reset_unlimited();
+        let amm_wasm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let lp_wasm_hash = env.deployer().upload_contract_wasm(token::WASM);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(env, &factory_addr);
+        factory.initialize(&admin, &amm_wasm_hash, &lp_wasm_hash);
+        factory_addr
     }
 
-    fn setup_pool(env: &Env) -> (Address, Address, Address, Address) {
+    fn setup_pool(env: &Env, factory_addr: &Address) -> (Address, Address, Address, Address) {
         let admin = Address::generate(env);
         let ta = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -174,27 +209,32 @@ mod tests {
         let tb = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
-        let pool = deploy_pool(env, &ta, &tb);
+        
+        let factory = FactoryClient::new(env, factory_addr);
+        factory.create_pool(&admin, &ta, &tb, &2_i128, &None);
+        let pool = factory.get_pool(&ta, &tb).unwrap();
+        let lp = factory.get_lp_token(&pool).unwrap();
 
-        let lp = Address::generate(env);
-        StellarAssetClient::new(env, &ta).mint(&lp, &2_000_000_i128);
-        StellarAssetClient::new(env, &tb).mint(&lp, &2_000_000_i128);
+        let provider = Address::generate(env);
+        StellarAssetClient::new(env, &ta).mint(&provider, &2_000_000_i128);
+        StellarAssetClient::new(env, &tb).mint(&provider, &2_000_000_i128);
         AmmPoolClient::new(env, &pool).add_liquidity(
-            &lp,
+            &provider,
             &1_000_000_i128,
             &1_000_000_i128,
             &0_i128,
             &u64::MAX,
         );
 
-        (ta, tb, pool, lp)
+        (ta, tb, pool, provider)
     }
 
     #[test]
     fn test_batch_multiple_swaps() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
 
         let trader = Address::generate(&env);
         StellarAssetClient::new(&env, &ta).mint(&trader, &500_000_i128);
@@ -221,9 +261,12 @@ mod tests {
             }),
         ];
 
+        let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+        
         let deadline = env.ledger().timestamp() + 1000;
-        let results = BatchRouterClient::new(&env, &env.register_contract(None, BatchRouter))
-            .execute_batch(&trader, &ops, &deadline);
+        let results = batch_client.execute_batch(&trader, &ops, &deadline);
 
         assert_eq!(results.len(), 3);
         match results.get(0).unwrap() {
@@ -236,7 +279,8 @@ mod tests {
     fn test_batch_swap_then_add_liquidity() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
 
         let trader = Address::generate(&env);
         StellarAssetClient::new(&env, &ta).mint(&trader, &200_000_i128);
@@ -263,9 +307,11 @@ mod tests {
         ];
 
         let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+
         let deadline = env.ledger().timestamp() + 1000;
-        let results =
-            BatchRouterClient::new(&env, &batch_addr).execute_batch(&trader, &ops, &deadline);
+        let results = batch_client.execute_batch(&trader, &ops, &deadline);
 
         assert_eq!(results.len(), 2);
         match results.get(0).unwrap() {
@@ -283,7 +329,8 @@ mod tests {
     fn test_batch_remove_liquidity_returns_token_amounts() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
 
         // The LP adds liquidity directly so the batch can later remove it.
         let lp = Address::generate(&env);
@@ -308,8 +355,11 @@ mod tests {
         ];
 
         let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+
         let deadline = env.ledger().timestamp() + 1000;
-        let results = BatchRouterClient::new(&env, &batch_addr).execute_batch(&lp, &ops, &deadline);
+        let results = batch_client.execute_batch(&lp, &ops, &deadline);
 
         assert_eq!(results.len(), 1);
         // The actual token amounts received are reported, not the shares burned.
@@ -327,7 +377,8 @@ mod tests {
     fn test_batch_atomic_revert_on_slippage() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
 
         let trader = Address::generate(&env);
         StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
@@ -349,8 +400,11 @@ mod tests {
         ];
 
         let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+
         let deadline = env.ledger().timestamp() + 1000;
-        BatchRouterClient::new(&env, &batch_addr).execute_batch(&trader, &ops, &deadline);
+        batch_client.execute_batch(&trader, &ops, &deadline);
     }
 
     #[test]
@@ -366,7 +420,8 @@ mod tests {
     fn test_batch_exceeds_max_ops() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, _tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, _tb, pool, _) = setup_pool(&env, &factory_addr);
 
         let trader = Address::generate(&env);
 
@@ -382,6 +437,9 @@ mod tests {
 
         let deadline = env.ledger().timestamp() + 1000;
         let batch_addr = env.register_contract(None, BatchRouter);
-        BatchRouterClient::new(&env, &batch_addr).execute_batch(&trader, &ops, &deadline);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+        
+        batch_client.execute_batch(&trader, &ops, &deadline);
     }
 }

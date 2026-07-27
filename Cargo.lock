@@ -125,6 +125,7 @@ name = "batch_router"
 version = "0.1.0"
 dependencies = [
  "amm",
+ "factory",
  "soroban-sdk",
  "token",
 ]
