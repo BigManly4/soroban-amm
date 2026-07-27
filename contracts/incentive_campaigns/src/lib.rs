@@ -43,6 +43,7 @@ pub struct Campaign {
     pub reward_rate: i128,
     pub active: bool,
     pub total_distributed: i128,
+    pub funding_amount: i128,
 }
 
 #[contracttype]
@@ -106,6 +107,7 @@ impl IncentiveCampaigns {
             reward_rate,
             active: true,
             total_distributed: 0,
+            funding_amount,
         };
         env.storage().persistent().set(&DataKey::Campaign(id), &campaign);
         env.storage()
@@ -152,10 +154,9 @@ impl IncentiveCampaigns {
 
     /// Recover undistributed reward tokens after a campaign has ended. Governance only.
     ///
-    /// Computes the maximum total distributable amount (`reward_rate × campaign_duration`)
-    /// and transfers any portion that was never claimed by providers back to `recipient`.
-    /// The campaign is marked **inactive** upon recovery so no further LP claims can be
-    /// made against the already-withdrawn balance.
+    /// Transfers the difference between the original `funding_amount` and what was
+    /// actually distributed (`total_distributed`) back to `recipient`. After recovery
+    /// the campaign is marked **inactive** so no further LP claims can be made.
     ///
     /// Governance should allow a reasonable grace period after `end_time` before calling
     /// this function so that LPs have an opportunity to claim their earned rewards first.
@@ -177,10 +178,7 @@ impl IncentiveCampaigns {
         let now = env.ledger().timestamp();
         assert!(now > campaign.end_time, "campaign not yet ended");
 
-        // Maximum that could ever be distributed = rate × full duration.
-        let campaign_duration = (campaign.end_time - campaign.start_time) as i128;
-        let max_distributable = campaign.reward_rate * campaign_duration;
-        let leftover = max_distributable - campaign.total_distributed;
+        let leftover = campaign.funding_amount - campaign.total_distributed;
 
         assert!(leftover > 0, "no leftover funds to recover");
 
@@ -339,7 +337,7 @@ mod tests {
     use amm::{AmmPool, AmmPoolClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
-        token::{StellarAssetClient, TokenClient as StellarTokenClient},
+        token::StellarAssetClient,
         Address, Env,
     };
     use token::{LpToken, LpTokenClient};
@@ -518,7 +516,7 @@ mod tests {
         let client = IncentiveCampaignsClient::new(&env, &incentives);
         let treasury = Address::generate(&env);
 
-        // Campaign: t=1_000..5_000, rate=100 → max_distributable = 100 * 4_000 = 400_000.
+        // Campaign: t=1_000..5_000, rate=100, funding=1_000_000.
         let id = client.create_campaign(
             &gov_addr,
             &pool,
@@ -540,10 +538,10 @@ mod tests {
         // Advance past end_time.
         env.ledger().with_mut(|l| l.timestamp = 8_000);
 
-        // Governance recovers the unclaimed remainder: max_distributable - total_distributed
-        // = 400_000 - 99_900 = 300_100.
+        // Governance recovers the unclaimed remainder: funding_amount - total_distributed
+        // = 1_000_000 - 99_900 = 900_100.
         let recovered = client.recover_leftover_funds(&gov_addr, &id, &treasury);
-        assert_eq!(recovered, 300_100, "should recover unclaimed rewards");
+        assert_eq!(recovered, 900_100, "should recover unclaimed rewards");
 
         // After recovery the campaign is inactive; LP cannot claim any more.
         assert!(
@@ -551,7 +549,7 @@ mod tests {
             "claim after recovery must fail (campaign inactive)"
         );
 
-        // ── Case 2: no claims at all → governance recovers the full budget ──────────
+        // ── Case 2: no claims at all → governance recovers the full funding_amount ──
         let id2 = client.create_campaign(
             &gov_addr,
             &pool,
@@ -565,7 +563,7 @@ mod tests {
 
         env.ledger().with_mut(|l| l.timestamp = 9_000);
         let full_recovery = client.recover_leftover_funds(&gov_addr, &id2, &treasury);
-        assert_eq!(full_recovery, 100 * 4_000, "full budget should be recoverable when no claims made");
+        assert_eq!(full_recovery, 1_000_000, "full budget should be recoverable when no claims made");
 
         // ── Case 3: recovery before end_time must be rejected ────────────────────────
         let id3 = client.create_campaign(
