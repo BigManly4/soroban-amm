@@ -100,6 +100,7 @@ pub enum DataKey {
     TickCumulative,        // i64 — accumulated tick * elapsed_seconds
     LastOracleTimestamp,   // u64 — last oracle update timestamp
     OraclePoint(u64),      // timestamp → i64 tick_cumulative snapshot
+    OracleTimestamps,      // Vec<u64> — sorted oracle snapshot times for interpolation
     SqrtPriceX96,
     Tick(i32),
     TickBitmap(i32),
@@ -264,7 +265,7 @@ impl ConcentratedLiquidity {
         let init_ts = env.ledger().timestamp();
         env.storage().instance().set(&DataKey::TickCumulative, &0_i64);
         env.storage().instance().set(&DataKey::LastOracleTimestamp, &init_ts);
-        env.storage().instance().set(&DataKey::OraclePoint(init_ts), &0_i64);
+        Self::record_oracle_point(&env, init_ts, 0);
         env.storage()
             .instance()
             .set(&DataKey::OracleAggregator, &Option::<Address>::None);
@@ -1816,9 +1817,7 @@ impl ConcentratedLiquidity {
             env.storage()
                 .instance()
                 .set(&DataKey::LastOracleTimestamp, &now);
-            env.storage()
-                .instance()
-                .set(&DataKey::OraclePoint(now), &new_cum);
+            Self::record_oracle_point(env, now, new_cum);
         }
 
         let fee_bps: i128 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
@@ -2216,7 +2215,8 @@ impl ConcentratedLiquidity {
     }
 
     /// Returns tick_cumulative at `seconds_ago` seconds in the past.
-    /// Looks up the stored oracle snapshot at exactly `now - seconds_ago`.
+    /// Uses exact oracle snapshots when available; otherwise linearly interpolates
+    /// between the nearest bracketing snapshots (issue #512).
     /// `seconds_ago == 0` returns the current cumulative value (extrapolated to now).
     pub fn observe(env: Env, seconds_ago: u64) -> i64 {
         let cum: i64 = env
@@ -2241,12 +2241,102 @@ impl ConcentratedLiquidity {
             let elapsed = (target_ts - last_ts) as i64;
             cum + (current_tick as i64) * elapsed
         } else {
-            // Look up stored oracle point at target timestamp
+            Self::oracle_cumulative_at(&env, target_ts, cum, last_ts)
+        }
+    }
+
+    fn record_oracle_point(env: &Env, timestamp: u64, cumulative: i64) {
+        env.storage()
+            .instance()
+            .set(&DataKey::OraclePoint(timestamp), &cumulative);
+        let mut timestamps: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleTimestamps)
+            .unwrap_or_else(|| Vec::new(env));
+        let append = timestamps.is_empty()
+            || timestamps.get(timestamps.len() - 1).unwrap_or(&0) < &timestamp;
+        if append {
+            timestamps.push_back(timestamp);
             env.storage()
                 .instance()
-                .get(&DataKey::OraclePoint(target_ts))
-                .unwrap_or(0)
+                .set(&DataKey::OracleTimestamps, &timestamps);
         }
+    }
+
+    /// Tick cumulative at `target_ts` using exact snapshots or linear interpolation.
+    fn oracle_cumulative_at(env: &Env, target_ts: u64, live_cum: i64, last_ts: u64) -> i64 {
+        if let Some(cum) = env
+            .storage()
+            .instance()
+            .get(&DataKey::OraclePoint(target_ts))
+        {
+            return cum;
+        }
+        let timestamps: Vec<u64> = match env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleTimestamps)
+        {
+            Some(ts) => ts,
+            None => {
+                return env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::OraclePoint(target_ts))
+                    .unwrap_or(0);
+            }
+        };
+        if timestamps.is_empty() {
+            return 0;
+        }
+        let first = timestamps.get(0).unwrap();
+        if target_ts < first {
+            return 0;
+        }
+        let n = timestamps.len();
+        let mut lo_idx: Option<usize> = None;
+        let mut hi_idx: Option<usize> = None;
+        for i in 0..n {
+            let t = timestamps.get(i).unwrap();
+            if t <= target_ts {
+                lo_idx = Some(i);
+            } else if hi_idx.is_none() {
+                hi_idx = Some(i);
+                break;
+            }
+        }
+        let lo = match lo_idx {
+            Some(i) => i,
+            None => return 0,
+        };
+        let t_lo = timestamps.get(lo).unwrap();
+        let c_lo: i64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::OraclePoint(t_lo))
+            .unwrap_or(0);
+        let (t_hi, c_hi) = match hi_idx {
+            Some(hi) => {
+                let t = timestamps.get(hi).unwrap();
+                let c = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::OraclePoint(t))
+                    .unwrap_or(0);
+                (t, c)
+            }
+            None => (last_ts, live_cum),
+        };
+        if target_ts == t_lo {
+            return c_lo;
+        }
+        if t_hi == t_lo {
+            return c_lo;
+        }
+        let dt = (t_hi - t_lo) as i128;
+        let elapsed = (target_ts - t_lo) as i128;
+        c_lo + (((c_hi - c_lo) as i128 * elapsed) / dt) as i64
     }
 
     /// Returns all open position tick-range pairs for `provider`.
@@ -3760,6 +3850,48 @@ mod test_new_features {
         let avg_tick = (obs_now - obs_200s_ago) / 200_i64;
         // avg tick = tick_at_1100 * 100 / 200 = tick_at_1100 / 2
         assert_eq!(avg_tick, (tick_at_1100 as i64) / 2);
+    }
+
+    #[test]
+    fn observe_interpolates_between_oracle_snapshots() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.budget().reset_unlimited();
+        env.ledger().set_timestamp(1_000);
+
+        let admin = Address::generate(&env);
+        let token_a = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_b = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let cl_addr = env.register_contract(None, ConcentratedLiquidity);
+        let client = ConcentratedLiquidityClient::new(&env, &cl_addr);
+        client.initialize(&admin, &token_a, &token_b, &30_i128, &0_i32, &1_i32);
+
+        StellarAssetClient::new(&env, &token_a).mint(&cl_addr, &1_000_000_i128);
+        StellarAssetClient::new(&env, &token_b).mint(&cl_addr, &1_000_000_i128);
+        let buyer = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_a).mint(&buyer, &2_000_i128);
+
+        env.ledger().set_timestamp(1_100);
+        client.swap(&buyer, &true, &100_i128, &0_u128, &0_i128, &u64::MAX);
+        let (cum_1100, _) = client.get_tick_cumulative();
+
+        env.ledger().set_timestamp(1_200);
+        client.swap(&buyer, &true, &100_i128, &0_u128, &0_i128, &u64::MAX);
+        let (cum_1200, _) = client.get_tick_cumulative();
+
+        env.ledger().set_timestamp(1_250);
+        // Midpoint between swap snapshots at t=1100 and t=1200 (no snapshot at t=1150).
+        let obs_mid = client.observe(&150_u64);
+        let expected_mid = cum_1100 + (cum_1200 - cum_1100) / 2;
+        assert_eq!(obs_mid, expected_mid);
+        // Exact-key lookup would have returned 0 at t=1150 when cum_1200 != 0.
+        if cum_1200 != cum_1100 {
+            assert_ne!(obs_mid, 0_i64);
+        }
     }
 
     // ── Issue #184: get_positions ─────────────────────────────────────────────
