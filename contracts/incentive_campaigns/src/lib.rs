@@ -45,6 +45,7 @@ use soroban_sdk::{
 pub trait LpTokenInterface {
     fn balance(env: Env, id: Address) -> i128;
     fn total_supply(env: Env) -> i128;
+    fn admin(env: Env) -> Address;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +210,9 @@ impl IncentiveCampaigns {
         assert!(end_time > start_time, "invalid campaign window");
         assert!(reward_rate > 0, "reward_rate must be positive");
         assert!(funding_amount > 0, "funding required");
+
+        let lp_admin = LpTokenClient::new(&env, &lp_token).admin();
+        assert!(lp_admin == pool, "lp_token does not match pool");
 
         let id: u64 = env
             .storage()
