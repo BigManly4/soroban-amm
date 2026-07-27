@@ -5,7 +5,7 @@
 //! binding (e.g. stellar-sdk-rs) can use the same types for argument / return
 //! value construction.
 
-use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env};
+use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env, Error, InvokeError};
 
 use crate::types::{LiquidityQuote, PoolInfo, SdkAmmError, SwapInQuote, SwapOutQuote};
 
@@ -338,7 +338,7 @@ impl<'a> AmmPoolSdk<'a> {
         deadline: u64,
         referrer: Option<Address>,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client.swap(
+        flatten(self.client.try_swap(
             trader,
             token_in,
             &amount_in,
@@ -358,7 +358,7 @@ impl<'a> AmmPoolSdk<'a> {
         deadline: u64,
         referrer: Option<Address>,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client.swap_exact_out(
+        flatten(self.client.try_swap_exact_out(
             trader,
             token_out,
             &amount_out,
@@ -377,7 +377,7 @@ impl<'a> AmmPoolSdk<'a> {
         min_shares: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client.add_liquidity(
+        flatten(self.client.try_add_liquidity(
             provider,
             &amount_a,
             &amount_b,
@@ -395,8 +395,8 @@ impl<'a> AmmPoolSdk<'a> {
         min_b: i128,
         deadline: u64,
     ) -> Result<(i128, i128), SdkAmmError> {
-        Ok(self.client
-            .remove_liquidity(provider, &shares, &min_a, &min_b, &deadline))
+        flatten(self.client
+            .try_remove_liquidity(provider, &shares, &min_a, &min_b, &deadline))
     }
 
     /// Issue a flash loan.
@@ -407,8 +407,28 @@ impl<'a> AmmPoolSdk<'a> {
         amount: i128,
         data: Bytes,
     ) -> Result<i128, SdkAmmError> {
-        Ok(self.client
-            .flash_loan(receiver, token, &amount, &data))
+        flatten(self.client
+            .try_flash_loan(receiver, token, &amount, &data))
+    }
+}
+
+/// Flattens the nested `Result` produced by a `try_*` client call into the
+/// SDK's own `Result<T, SdkAmmError>`.
+///
+/// A contract-level error (e.g. `Paused`, `SlippageExceeded`) surfaces as
+/// `Err(Ok(e))` in the client's return type and is propagated as `Err(e)`
+/// here. The remaining two arms — a value that failed to decode, or a
+/// host-level invocation error (bad function name, budget exceeded, etc.) —
+/// are not business-logic errors an integrator can meaningfully react to, so
+/// they panic just like the non-`try_` client methods do.
+fn flatten<T>(
+    res: Result<Result<T, Error>, Result<SdkAmmError, InvokeError>>,
+) -> Result<T, SdkAmmError> {
+    match res {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => panic!("failed to decode AMM pool return value: {:?}", e),
+        Err(Ok(contract_err)) => Err(contract_err),
+        Err(Err(invoke_err)) => panic!("AMM pool host invocation error: {:?}", invoke_err),
     }
 }
 
