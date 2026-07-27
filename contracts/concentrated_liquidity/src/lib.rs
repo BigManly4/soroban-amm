@@ -902,13 +902,31 @@ impl ConcentratedLiquidity {
             let sqrt_current = Self::tick_to_sqrt_price_x96(current_tick);
 
             if sqrt_current >= sqrt_upper {
-                // Degenerate: current at or above upper tick - treat as above-range for A
-                let liq = math::get_liquidity_for_amount0(sqrt_upper, sqrt_upper, amount_in);
-                (amount_in, 0_i128, liq.max(1), amount_in)
+                // Degenerate: current at or above upper tick
+                if is_token_a {
+                    let liq = math::get_liquidity_for_amount0(sqrt_current, sqrt_upper, amount_in);
+                    let liq = liq.max(1);
+                    let used = math::get_amount0_delta(sqrt_current, sqrt_upper, liq);
+                    (used, 0_i128, liq, used)
+                } else {
+                    let liq = math::get_liquidity_for_amount1(sqrt_lower, sqrt_current, amount_in);
+                    let liq = liq.max(1);
+                    let used = math::get_amount1_delta(sqrt_lower, sqrt_current, liq);
+                    (0_i128, used, liq, used)
+                }
             } else if sqrt_current <= sqrt_lower {
-                // Degenerate: current at or below lower tick - treat as below-range for B
-                let liq = math::get_liquidity_for_amount1(sqrt_lower, sqrt_lower, amount_in);
-                (0_i128, amount_in, liq.max(1), amount_in)
+                // Degenerate: current at or below lower tick
+                if is_token_a {
+                    let liq = math::get_liquidity_for_amount0(sqrt_current, sqrt_upper, amount_in);
+                    let liq = liq.max(1);
+                    let used = math::get_amount0_delta(sqrt_current, sqrt_upper, liq);
+                    (used, 0_i128, liq, used)
+                } else {
+                    let liq = math::get_liquidity_for_amount1(sqrt_lower, sqrt_current, amount_in);
+                    let liq = liq.max(1);
+                    let used = math::get_amount1_delta(sqrt_lower, sqrt_current, liq);
+                    (0_i128, used, liq, used)
+                }
             } else if is_token_a {
                 // Token A covers [current_price, upper_price].
                 // Liquidity is computed from the amount, then we back-compute actual token amount.
