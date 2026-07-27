@@ -26,6 +26,11 @@ use soroban_sdk::{contracterror, contracttype, Address};
 /// | 13   | WrongAdmin           | `accept_admin` caller ≠ pending nominee              | Have the correct address call `accept_admin`      |
 /// | 14   | Reentrant            | Reentrant call detected during flash loan callback   | Do not call pool functions from `on_flash_loan`   |
 /// | 15   | CircuitBreaker       | Price moved > threshold, pool auto-paused            | Wait for cooldown or governance action            |
+/// | 16   | FotSlippage          | Fee-on-transfer token deducted more than min_received| Widen `min_received` or use a non-FoT token      |
+/// | 17   | OracleDeviationExceeded | Spot price deviated beyond oracle tolerance       | Retry when oracle price stabilises                |
+/// | 18   | FlashLoanRepaymentFailed | Receiver did not repay borrowed amounts + fees | Ensure `on_flash_loan` repays in full             |
+/// | 19   | AlreadyExecuted      | Multisig emergency withdrawal was already executed   | No action — proposal already carried out          |
+/// | 20   | ProposalExpired      | Multisig emergency withdrawal proposal has expired   | Submit a new proposal                             |
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SdkAmmError {
@@ -44,6 +49,11 @@ pub enum SdkAmmError {
     WrongAdmin = 13,
     Reentrant = 14,
     CircuitBreaker = 15,
+    FotSlippage = 16,
+    OracleDeviationExceeded = 17,
+    FlashLoanRepaymentFailed = 18,
+    AlreadyExecuted = 19,
+    ProposalExpired = 20,
 }
 
 // ── Pool state ────────────────────────────────────────────────────────────────
