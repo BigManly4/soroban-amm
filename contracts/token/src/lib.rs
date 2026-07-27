@@ -493,11 +493,6 @@ impl LpToken {
                 .persistent()
                 .extend_ttl(&trunc_key, Self::MIN_TTL, Self::BUMP_TO);
         }
-        checkpoints.push_back(Checkpoint { ledger, balance });
-        env.storage().persistent().set(&key, &checkpoints);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, Self::MIN_TTL, Self::BUMP_TO);
     }
 }
 
