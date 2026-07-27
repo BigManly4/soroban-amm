@@ -123,6 +123,13 @@ impl DexAggregator {
             .set(&DataKey::ClPoolCount, &0u32);
     }
 
+    pub fn set_max_hops(env: Env, max_hops: u32) {
+        Self::extend_ttl(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxHops, &max_hops);
+    }
+
     pub fn register_cl_pool(
         env: Env,
         pool: Address,
@@ -178,7 +185,12 @@ impl DexAggregator {
         Self::extend_ttl(&env);
         assert!(token_in != token_out, "same token");
         assert!(amount_in > 0, "amount must be positive");
-        let cap = max_hops.min(Self::DEFAULT_MAX_HOPS);
+        let stored_max_hops: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHops)
+            .unwrap_or(Self::DEFAULT_MAX_HOPS);
+        let cap = max_hops.min(stored_max_hops);
         if cap == 0 {
             return Err(AggregatorError::NoRouteFound);
         }
