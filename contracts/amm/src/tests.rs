@@ -1081,6 +1081,34 @@ fn test_swap_emits_token_out_in_event_payload() {
 }
 
 #[test]
+fn test_snapshot_position_records_pool_state() {
+    let ts = setup_pool(30);
+    let env = &ts.env;
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &1_000_000_i128);
+    tb_sac.mint(&provider, &1_000_000_i128);
+    AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
+
+    let snapshots = amm.get_snapshots();
+    assert_eq!(snapshots.len(), 0);
+
+    amm.snapshot_position();
+
+    let snapshots = amm.get_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    let snapshot = snapshots.get(0).unwrap();
+    assert_eq!(snapshot.reserve_a, 1_000_000);
+    assert_eq!(snapshot.reserve_b, 1_000_000);
+    assert_eq!(snapshot.total_shares, 1_000_000);
+    assert_eq!(snapshot.price_range_low, 900_000);
+    assert_eq!(snapshot.price_range_high, 1_100_000);
+}
+
+#[test]
 fn test_twap_oracle() {
     let ts = setup_pool(30);
     let env = &ts.env;
