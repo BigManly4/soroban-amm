@@ -1646,6 +1646,7 @@ impl AmmPool {
 
         // Checkpoint TWAP before updating reserves.
         let (reserve_a, reserve_b) = Self::checkpoint_oracles(&env);
+        Self::check_circuit_breaker(&env)?;
 
         let owned = Self::shares_of(env.clone(), provider.clone());
         if owned < shares {
@@ -1671,7 +1672,7 @@ impl AmmPool {
         lp_client.burn(&provider, &shares);
 
         // Determine which token we keep and which we swap away.
-        let (_token_keep, _token_swap, amount_keep, amount_swap) = if token_out == token_a {
+        let (_token_keep, token_swap, amount_keep, amount_swap) = if token_out == token_a {
             (token_a.clone(), token_b.clone(), withdraw_a, withdraw_b)
         } else {
             (token_b.clone(), token_a.clone(), withdraw_b, withdraw_a)
@@ -1717,6 +1718,8 @@ impl AmmPool {
             // We're swapping token_a for more token_b.
             amount_swap_with_fee * new_reserve_b / (new_reserve_a * 10_000 + amount_swap_with_fee)
         };
+
+        Self::check_oracle_deviation(&env, &token_swap, &token_out, amount_swap, swap_output)?;
 
         // Total output is the amount we kept from withdrawal plus the swap output.
         let total_out = amount_keep + swap_output;

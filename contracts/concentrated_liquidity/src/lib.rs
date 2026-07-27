@@ -1330,7 +1330,7 @@ impl ConcentratedLiquidity {
         // that provider reclaim the new owner's fees via the legacy path.
         let closed = env
             .storage()
-            .instance()
+            .persistent()
             .get::<_, Position>(&DataKey::Position(provider.clone(), lower_tick, upper_tick))
             .map(|p| p.liquidity == 0)
             .unwrap_or(true);
@@ -1614,7 +1614,7 @@ impl ConcentratedLiquidity {
     /// After a burn, if the position is fully closed and tokenized, burn the
     /// NFT and clear both indexes.
     fn cleanup_nft_if_closed(env: &Env, provider: &Address, lower_tick: i32, upper_tick: i32) {
-        let pos: Option<Position> = env.storage().instance().get(&DataKey::Position(
+        let pos: Option<Position> = env.storage().persistent().get(&DataKey::Position(
             provider.clone(),
             lower_tick,
             upper_tick,
@@ -6016,6 +6016,65 @@ mod test_single_token_deposit {
         // owed balance was swept to Bob on close.
         let (alice_a, alice_b) = client.collect_fees(&alice, &0_i32, &150_i32);
         assert_eq!((alice_a, alice_b), (0_i128, 0_i128));
+    }
+
+    #[test]
+    fn test_partial_burn_by_token_id_preserves_nft_and_indexes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+
+        let token_a = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_b = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let cl_addr = env.register_contract(None, ConcentratedLiquidity);
+        let client = ConcentratedLiquidityClient::new(&env, &cl_addr);
+        client.initialize(&admin, &token_a, &token_b, &1000_i128, &100_i32, &1_i32);
+
+        let nft_addr = env.register_contract(None, ClPositionNft);
+        let nft = ClPositionNftClient::new(&env, &nft_addr);
+        nft.initialize(&admin, &cl_addr);
+        client.set_position_nft(&admin, &Some(nft_addr.clone()));
+
+        StellarAssetClient::new(&env, &token_a).mint(&alice, &1_000_000_i128);
+        StellarAssetClient::new(&env, &token_b).mint(&alice, &1_000_000_i128);
+        client.mint_position(
+            &alice,
+            &0_i32,
+            &150_i32,
+            &100_000_i128,
+            &100_000_i128,
+            &0_i128,
+            &0_i128,
+        );
+
+        let total_liquidity = client.get_position(&alice, &0_i32, &150_i32).liquidity;
+        let partial_burn = total_liquidity / 2;
+
+        // Perform partial burn via token ID
+        client.burn_position_by_token_id(&alice, &0_u64, &partial_burn);
+
+        // Position still exists with remaining liquidity
+        let pos_after = client.get_position(&alice, &0_i32, &150_i32);
+        assert_eq!(pos_after.liquidity, total_liquidity - partial_burn);
+
+        // NFT still exists and owner is Alice
+        assert_eq!(nft.owner_of(&0_u64), alice);
+
+        // Burn remaining liquidity
+        client.burn_position_by_token_id(&alice, &0_u64, &(total_liquidity - partial_burn));
+
+        // Position is now fully closed
+        let pos_final = client.get_position(&alice, &0_i32, &150_i32);
+        assert_eq!(pos_final.liquidity, 0);
+
+        // NFT has been burned (trying owner_of panics / returns error)
+        let owner_res = nft.try_owner_of(&0_u64);
+        assert!(owner_res.is_err());
     }
 
     #[test]

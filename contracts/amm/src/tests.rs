@@ -1583,6 +1583,40 @@ fn test_remove_liquidity_one_sided_slippage_fails() {
 }
 
 #[test]
+fn test_remove_liquidity_one_sided_circuit_breaker() {
+    let ts = setup_pool(30);
+    let env = &ts.env;
+    env.ledger().with_mut(|li| li.sequence_number = 100);
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+
+    // Set circuit breaker threshold to 100 bps (1%) and cooldown to 600 seconds.
+    amm.set_circuit_breaker_config(&100_i128, &600_u64);
+
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &10_000_000_i128);
+    tb_sac.mint(&provider, &10_000_000_i128);
+    let shares = AddLiquidity::new(&amm, &provider, 10_000_000, 10_000_000).execute();
+
+    // Cause a price movement in the same ledger sequence using swap.
+    let trader = Address::generate(env);
+    ta_sac.mint(&trader, &5_000_000_i128);
+    Swap::new(&amm, &trader, &ts.ta_addr, 5_000_000).execute();
+
+    // Now attempting a large remove_liquidity_one_sided in the same ledger sequence will trip circuit breaker.
+    let res = amm.try_remove_liquidity_one_sided(
+        &provider,
+        &shares,
+        &ts.ta_addr,
+        &1_i128,
+        &u64::MAX,
+    );
+    assert!(res.is_err());
+}
+
+#[test]
 fn bench_swap_cost() {
     extern crate std;
     let ts = setup_pool(30);

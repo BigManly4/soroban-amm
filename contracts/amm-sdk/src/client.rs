@@ -59,7 +59,6 @@ pub trait AmmPoolInterface {
         amount_in: i128,
         min_out: i128,
         deadline: u64,
-        referrer: Option<Address>,
     ) -> Result<i128, SdkAmmError>;
 
     fn swap_exact_out(
@@ -69,7 +68,6 @@ pub trait AmmPoolInterface {
         amount_out: i128,
         max_in: i128,
         deadline: u64,
-        referrer: Option<Address>,
     ) -> Result<i128, SdkAmmError>;
 
     fn flash_loan(
@@ -350,7 +348,6 @@ impl<'a> AmmPoolSdk<'a> {
         amount_in: i128,
         min_out: i128,
         deadline: u64,
-        referrer: Option<Address>,
     ) -> Result<i128, SdkAmmError> {
         Ok(self
             .client
@@ -365,7 +362,6 @@ impl<'a> AmmPoolSdk<'a> {
         amount_out: i128,
         max_in: i128,
         deadline: u64,
-        referrer: Option<Address>,
     ) -> Result<i128, SdkAmmError> {
         Ok(self.client.swap_exact_out(
             trader,
@@ -373,7 +369,6 @@ impl<'a> AmmPoolSdk<'a> {
             &amount_out,
             &max_in,
             &deadline,
-            &referrer,
         ))
     }
 
