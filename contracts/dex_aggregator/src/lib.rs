@@ -285,13 +285,13 @@ impl DexAggregator {
         // node re-expands to O(N) neighbours regardless of whether they have
         // already been explored, blowing the frontier up to O(N^max_hops) and
         // exhausting the per-transaction instruction budget (#363).
-        let mut visited: Vec<(Address, u32)> = Vec::new(env);
+        let mut visited: Vec<(Address, u32, i128)> = Vec::new(env);
 
         frontier_token.push_back(token_in.clone());
         frontier_amount.push_back(amount_in);
         frontier_hops.push_back(Vec::new(env));
         frontier_depth.push_back(0);
-        visited.push_back((token_in.clone(), 0));
+        visited.push_back((token_in.clone(), 0, amount_in));
 
         let mut idx: u32 = 0;
         while idx < frontier_token.len() {
@@ -333,9 +333,8 @@ impl DexAggregator {
                         best_hops = new_hops;
                     }
                 } else if depth + 1 < max_hops
-                    && !Self::is_visited(&visited, &next_token, depth + 1)
+                    && !Self::is_visited_and_worse(&mut visited, &next_token, depth + 1, step.amount_out)
                 {
-                    visited.push_back((next_token.clone(), depth + 1));
                     frontier_token.push_back(next_token);
                     frontier_amount.push_back(step.amount_out);
                     frontier_hops.push_back(new_hops);
@@ -519,14 +518,25 @@ impl DexAggregator {
             || (info.token_a == *token_out && info.token_b == *token_in)
     }
 
-    /// Has `(token, depth)` already been enqueued onto the BFS frontier? (#363)
-    fn is_visited(visited: &Vec<(Address, u32)>, token: &Address, depth: u32) -> bool {
+    /// Has `(token, depth)` already been enqueued with a better or equal amount? (#363)
+    fn is_visited_and_worse(
+        visited: &mut Vec<(Address, u32, i128)>,
+        token: &Address,
+        depth: u32,
+        amount: i128,
+    ) -> bool {
         for i in 0..visited.len() {
-            let (t, d) = visited.get(i).unwrap();
+            let (t, d, a) = visited.get(i).unwrap();
             if d == depth && t == *token {
-                return true;
+                if amount <= a {
+                    return true;
+                } else {
+                    visited.set(i, (t, d, amount));
+                    return false;
+                }
             }
         }
+        visited.push_back((token.clone(), depth, amount));
         false
     }
 
@@ -567,15 +577,23 @@ mod tests {
         let token_a = Address::generate(&env);
         let token_b = Address::generate(&env);
 
-        let mut visited: Vec<(Address, u32)> = Vec::new(&env);
-        visited.push_back((token_a.clone(), 1));
+        let mut visited: Vec<(Address, u32, i128)> = Vec::new(&env);
+        visited.push_back((token_a.clone(), 1, 100));
 
-        // Same (token, depth) pair is treated as already explored.
-        assert!(DexAggregator::is_visited(&visited, &token_a, 1));
+        // Same (token, depth) pair with worse or equal amount is blocked.
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 100));
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 50));
+        // Same (token, depth) pair with strictly better amount is allowed.
+        assert!(!DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 150));
+        
+        // After being allowed, the new best amount is recorded (150).
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 150));
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 140));
+
         // Same token at a different depth must still be explorable.
-        assert!(!DexAggregator::is_visited(&visited, &token_a, 2));
+        assert!(!DexAggregator::is_visited_and_worse(&mut visited, &token_a, 2, 50));
         // A different token at the same depth is independent.
-        assert!(!DexAggregator::is_visited(&visited, &token_b, 1));
+        assert!(!DexAggregator::is_visited_and_worse(&mut visited, &token_b, 1, 50));
     }
 
     #[test]
