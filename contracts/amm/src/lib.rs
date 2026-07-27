@@ -23,6 +23,9 @@ pub const WASM: &[u8] = include_bytes!(concat!(
 // Standard SEP-41 interface for pool tokens (token_a, token_b)
 use soroban_sdk::token::Client as SepTokenClient;
 
+mod snapshots;
+pub use snapshots::{Snapshot, MAX_SNAPSHOTS};
+
 /// Interface for the LP token contract.
 ///
 /// We define this locally rather than importing the `token` crate to avoid
@@ -182,6 +185,8 @@ pub enum DataKey {
     OracleAggregator,
     /// Max allowed spot-vs-oracle deviation in basis points (e.g. 500 = 5 %).
     MaxOracleDeviationBps,
+    /// Periodic pool snapshots captured by `snapshot_position`.
+    Snapshots,
 }
 
 // ── Pool info returned by `get_info` ─────────────────────────────────────────
@@ -2440,6 +2445,16 @@ impl AmmPool {
         (reserve_in * amount_out * 10_000) / ((reserve_out - amount_out) * (10_000 - fee_bps)) + 1
     }
 
+    /// Record a lightweight pool snapshot for diagnostics and off-chain monitoring.
+    pub fn snapshot_position(env: Env) {
+        snapshots::snapshot_position(&env);
+    }
+
+    /// Return the stored pool snapshots.
+    pub fn get_snapshots(env: Env) -> soroban_sdk::Vec<Snapshot> {
+        snapshots::get_snapshots(&env)
+    }
+
     /// Return full pool state.
     /// Return a snapshot of the full pool state.
     ///
@@ -2830,25 +2845,39 @@ impl AmmPool {
         (price_cum_a, price_cum_b, last_timestamp)
     }
 
-    fn get_reserve_a(env: Env) -> i128 {
+    pub(crate) fn get_reserve_a(env: Env) -> i128 {
         env.storage()
             .instance()
             .get(&DataKey::ReserveA)
             .unwrap_or(0)
     }
 
-    fn get_reserve_b(env: Env) -> i128 {
+    pub(crate) fn get_reserve_b(env: Env) -> i128 {
         env.storage()
             .instance()
             .get(&DataKey::ReserveB)
             .unwrap_or(0)
     }
 
-    fn get_total_shares(env: Env) -> i128 {
+    pub(crate) fn get_total_shares(env: Env) -> i128 {
         env.storage()
             .instance()
             .get(&DataKey::TotalShares)
             .unwrap_or(0)
+    }
+
+    pub(crate) fn get_accrued_fees_internal(env: Env) -> (i128, i128) {
+        let fee_a: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccruedFeeA)
+            .unwrap_or(0);
+        let fee_b: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccruedFeeB)
+            .unwrap_or(0);
+        (fee_a, fee_b)
     }
 
     fn get_flash_loan_fee_bps(env: Env) -> i128 {
