@@ -32,6 +32,13 @@ use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, Symbol,
 };
 
+// ── Storage TTL ──────────────────────────────────────────────────────────────
+
+/// Bump per-pair requirements when their remaining TTL drops below this.
+const MIN_PERSISTENT_TTL: u32 = 172_800; // ~10 days at 5s/ledger
+/// Target TTL to extend per-pair requirements to on write.
+const PERSISTENT_TTL_BUMP_TO: u32 = 259_200; // ~15 days at 5s/ledger
+
 // ── External contract interfaces ─────────────────────────────────────────────
 
 /// Subset of the AMM pool interface needed to read current reserves.
@@ -183,7 +190,11 @@ impl ReserveManager {
     /// order-independent.
     ///
     /// Set both values to 0 to remove a requirement.
-    pub fn set_min_reserve(
+    ///
+    /// Per-pair requirements are held in persistent storage so each pair is an
+    /// independent entry with its own TTL, rather than sharing the single
+    /// instance-storage blob loaded on every invocation.
+       pub fn set_min_reserve(
         env: Env,
         token_a: Address,
         token_b: Address,
@@ -197,11 +208,16 @@ impl ReserveManager {
         }
 
         let token_a_is_first = token_a < token_b;
-        let (ta, tb) = if token_a_is_first {
-            (token_a, token_b)
-        } else {
-            (token_b, token_a)
-        };
+        let (ta, tb) = Self::normalize(token_a, token_b);
+        let key = DataKey::MinReserve(ta, tb);
+
+        // Both minimums zero means "no requirement": delete the entry so it does
+        // not linger, matching the documented behaviour above.
+        if min_reserve_a == 0 && min_reserve_b == 0 {
+            env.storage().persistent().remove(&key);
+            return Ok(());
+        }
+
         let (normalized_min_a, normalized_min_b) = if token_a_is_first {
             (min_reserve_a, min_reserve_b)
         } else {
@@ -211,9 +227,10 @@ impl ReserveManager {
             min_reserve_a: normalized_min_a,
             min_reserve_b: normalized_min_b,
         };
+        env.storage().persistent().set(&key, &req);
         env.storage()
-            .instance()
-            .set(&DataKey::MinReserve(ta, tb), &req);
+            .persistent()
+            .extend_ttl(&key, MIN_PERSISTENT_TTL, PERSISTENT_TTL_BUMP_TO);
         Ok(())
     }
 
@@ -221,7 +238,7 @@ impl ReserveManager {
     pub fn get_min_reserve(env: Env, token_a: Address, token_b: Address) -> ReserveRequirement {
         let (ta, tb) = Self::normalize(token_a, token_b);
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::MinReserve(ta, tb))
             .unwrap_or(ReserveRequirement {
                 min_reserve_a: 0,
@@ -253,7 +270,7 @@ impl ReserveManager {
 
         let req: ReserveRequirement = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::MinReserve(ta, tb))
             .unwrap_or(ReserveRequirement {
                 min_reserve_a: 0,
@@ -504,6 +521,27 @@ mod tests {
 
         rm.set_min_reserve(&s.ta, &s.tb, &0_i128, &0_i128);
         assert!(rm.check_reserves(&s.pool));
+    }
+
+    #[test]
+    fn test_set_min_reserve_to_zero_deletes_persistent_entry() {
+        let s = setup();
+        let rm = ReserveManagerClient::new(&s.env, &s.rm_addr);
+
+        rm.set_min_reserve(&s.ta, &s.tb, &2_000_000_i128, &2_000_000_i128);
+        let (ta, tb) = ReserveManager::normalize(s.ta.clone(), s.tb.clone());
+        let key = DataKey::MinReserve(ta, tb);
+
+        // The entry exists while a non-zero requirement is set.
+        assert!(s
+            .env
+            .as_contract(&s.rm_addr, || s.env.storage().persistent().has(&key)));
+
+        // Setting both minimums to zero must delete the key, not store (0, 0).
+        rm.set_min_reserve(&s.ta, &s.tb, &0_i128, &0_i128);
+        assert!(!s
+            .env
+            .as_contract(&s.rm_addr, || s.env.storage().persistent().has(&key)));
     }
 
     #[test]
