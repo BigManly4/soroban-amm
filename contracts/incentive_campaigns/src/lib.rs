@@ -55,6 +55,8 @@ pub trait LpTokenInterface {
 #[contracttype]
 pub enum DataKey {
     Governance,
+    /// Nominated governance address awaiting `accept_governance`.
+    PendingGovernance,
     NextCampaignId,
     Campaign(u64),
     CampaignIdByIndex(u64),
@@ -196,6 +198,64 @@ impl IncentiveCampaigns {
             .instance()
             .set(&DataKey::NextDistributionId, &1u64);
         extend_instance_ttl(&env);
+    }
+
+    /// Nominate a new governance address. Current governance only.
+    ///
+    /// The nominee must call `accept_governance` to complete the handover, so a
+    /// mistyped address cannot brick the governance-only entrypoints.
+    pub fn propose_governance(env: Env, caller: Address, new_governance: Address) {
+        extend_instance_ttl(&env);
+        caller.require_auth();
+        Self::require_governance(&env, &caller);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingGovernance, &Some(new_governance.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "governance_proposed"),),
+            (caller, new_governance),
+        );
+    }
+
+    /// Accept a pending governance nomination. Nominee only.
+    pub fn accept_governance(env: Env, new_governance: Address) {
+        extend_instance_ttl(&env);
+        let pending: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingGovernance)
+            .unwrap_or(None);
+        let nominee = pending.expect("no pending governance");
+        assert!(new_governance == nominee, "not pending governance");
+        new_governance.require_auth();
+
+        let old_governance: Address = env.storage().instance().get(&DataKey::Governance).unwrap();
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &new_governance);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingGovernance, &Option::<Address>::None);
+
+        env.events().publish(
+            (Symbol::new(&env, "governance_transferred"),),
+            (old_governance, new_governance),
+        );
+    }
+
+    /// Return the active governance address.
+    pub fn get_governance(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Governance).unwrap()
+    }
+
+    /// Return the pending governance nominee, if any.
+    pub fn get_pending_governance(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingGovernance)
+            .unwrap_or(None)
     }
 
     /// Create a time-based incentive campaign. Governance only.
