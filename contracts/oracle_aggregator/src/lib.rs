@@ -244,7 +244,7 @@ impl OracleAggregator {
             updated.push_back(source);
         }
 
-        if !stale_sources.is_empty() {
+        if persist_sources && !stale_sources.is_empty() {
             env.events()
                 .publish((symbol_short!("stale_src"),), (stale_sources,));
         }
@@ -279,7 +279,7 @@ impl OracleAggregator {
             }
         }
 
-        if !deviant_sources.is_empty() {
+        if persist_sources && !deviant_sources.is_empty() {
             env.events()
                 .publish((symbol_short!("deviant"),), (deviant_sources,));
         }
