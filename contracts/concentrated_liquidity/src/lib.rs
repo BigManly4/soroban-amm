@@ -55,8 +55,9 @@ pub enum ClError {
     InvalidToken = 16,       // token_in is not token_a or token_b
     RangeOrderInRange = 17,  // range order must be fully out-of-range at creation
     OracleDeviationExceeded = 18,
-    NftNotConfigured = 19, // no position-NFT contract is wired into the pool
-    NotNftOwner = 20,      // caller does not currently own the position NFT
+    NftNotConfigured = 19,        // no position-NFT contract is wired into the pool
+    NotNftOwner = 20,             // caller does not currently own the position NFT
+    NftContractChangeBlocked = 21, // changing NFT contract while positions are tokenized would orphan indices
 }
 
 /// Status of a range order (issue #295).
@@ -310,6 +311,23 @@ impl ConcentratedLiquidity {
             return Err(ClError::Unauthorized);
         }
         admin.require_auth();
+
+        // Safety check: prevent changing NFT contract when positions are tokenized.
+        // Changing the contract would orphan existing token_id → position indices,
+        // causing resolve_token_owner/ensure_legacy_owner to query the wrong NFT
+        // and either trap (id doesn't exist) or authorize the wrong owner (id collision).
+        let existing_nft: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PositionNft)
+            .unwrap_or(None);
+        
+        // Only allow changing from Some → None (detach) or None → Some (initial set).
+        // Changing from Some(A) → Some(B) is forbidden.
+        if existing_nft.is_some() && nft.is_some() && existing_nft != nft {
+            return Err(ClError::NftContractChangeBlocked);
+        }
+
         env.storage().instance().set(&DataKey::PositionNft, &nft);
         Ok(())
     }
@@ -6185,6 +6203,60 @@ mod test_single_token_deposit {
             f.client.position_token_id(&f.alice, &f.lower, &f.upper),
             None
         );
+    }
+
+    #[test]
+    fn cannot_change_nft_contract_after_positions_tokenized() {
+        // Regression test for vulnerability: changing DataKey::PositionNft to a
+        // different contract after positions have been minted would orphan the
+        // existing NftTokenToPosition / PositionNftToken indices. Later calls to
+        // resolve_token_owner or ensure_legacy_owner would query the new contract
+        // with stale token_ids from the old contract, causing:
+        // 1. Trap if token_id doesn't exist in new contract (locks LP out)
+        // 2. Wrong owner if new contract reused the same sequential id (authorization bypass)
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let token_a = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_b = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        
+        let cl_addr = env.register_contract(None, ConcentratedLiquidity);
+        let client = ConcentratedLiquidityClient::new(&env, &cl_addr);
+        client.initialize(&admin, &token_a, &token_b, &30_i128, &0_i32, &1_i32);
+
+        // Wire NFT contract v1 and mint a position.
+        let nft_v1 = env.register_contract(None, ClPositionNft);
+        let nft_v1_client = ClPositionNftClient::new(&env, &nft_v1);
+        nft_v1_client.initialize(&admin, &cl_addr);
+        client.set_position_nft(&admin, &Some(nft_v1.clone()));
+
+        let alice = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_a).mint(&alice, &1_000_000_i128);
+        StellarAssetClient::new(&env, &token_b).mint(&alice, &1_000_000_i128);
+        
+        client.mint_position(&alice, &-100, &100, &100_000_i128, &100_000_i128, &0, &0);
+        assert_eq!(client.position_token_id(&alice, &-100, &100), Some(0_u64));
+
+        // Attempt to change to NFT contract v2 — must be rejected.
+        let nft_v2 = env.register_contract(None, ClPositionNft);
+        let err = client
+            .try_set_position_nft(&admin, &Some(nft_v2))
+            .err()
+            .unwrap()
+            .unwrap();
+        assert_eq!(err, ClError::NftContractChangeBlocked);
+
+        // Changing to None (detach) should still be allowed.
+        client.set_position_nft(&admin, &None);
+        assert_eq!(client.position_nft(), None);
+
+        // Re-attaching the same contract is allowed.
+        client.set_position_nft(&admin, &Some(nft_v1.clone()));
+        assert_eq!(client.position_nft(), Some(nft_v1));
     }
 }
 
