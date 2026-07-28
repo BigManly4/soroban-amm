@@ -2401,7 +2401,7 @@ impl ConcentratedLiquidity {
             .get(&DataKey::OracleTimestamps)
             .unwrap_or_else(|| Vec::new(env));
         let append = timestamps.is_empty()
-            || timestamps.get(timestamps.len() - 1).unwrap_or(&0) < &timestamp;
+            || timestamps.get(timestamps.len() - 1).unwrap_or(0) < timestamp;
         if append {
             timestamps.push_back(timestamp);
             env.storage()
