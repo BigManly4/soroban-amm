@@ -85,6 +85,8 @@ pub enum DataKey {
 pub enum ReserveManagerError {
     NoPendingGovernance = 1,
     Unauthorized = 2,
+    AlreadyInitialized = 3,
+    NegativeReserveAmount = 4,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -98,15 +100,15 @@ impl ReserveManager {
 
     /// One-time setup. `governance` is the only address permitted to call
     /// `set_min_reserve` and `transfer_governance`.
-    pub fn initialize(env: Env, governance: Address, factory: Address) {
-        assert!(
-            !env.storage().instance().has(&DataKey::Governance),
-            "already initialized"
-        );
+    pub fn initialize(env: Env, governance: Address, factory: Address) -> Result<(), ReserveManagerError> {
+        if env.storage().instance().has(&DataKey::Governance) {
+            return Err(ReserveManagerError::AlreadyInitialized);
+        }
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
         env.storage().instance().set(&DataKey::Factory, &factory);
+        Ok(())
     }
 
     // ── Governance ────────────────────────────────────────────────────────────
@@ -187,11 +189,12 @@ impl ReserveManager {
         token_b: Address,
         min_reserve_a: i128,
         min_reserve_b: i128,
-    ) {
+    ) -> Result<(), ReserveManagerError> {
         let gov: Address = env.storage().instance().get(&DataKey::Governance).unwrap();
         gov.require_auth();
-        assert!(min_reserve_a >= 0, "min_reserve_a must be non-negative");
-        assert!(min_reserve_b >= 0, "min_reserve_b must be non-negative");
+        if min_reserve_a < 0 || min_reserve_b < 0 {
+            return Err(ReserveManagerError::NegativeReserveAmount);
+        }
 
         let token_a_is_first = token_a < token_b;
         let (ta, tb) = if token_a_is_first {
@@ -211,6 +214,7 @@ impl ReserveManager {
         env.storage()
             .instance()
             .set(&DataKey::MinReserve(ta, tb), &req);
+        Ok(())
     }
 
     /// Return the minimum reserve requirement for a pair, or (0, 0) if none.
@@ -373,7 +377,10 @@ mod tests {
         let rm_addr = env.register_contract(None, ReserveManager);
         let rm = ReserveManagerClient::new(&env, &rm_addr);
         rm.initialize(&gov, &factory);
-        assert!(rm.try_initialize(&gov, &factory).is_err());
+        assert_eq!(
+            rm.try_initialize(&gov, &factory),
+            Err(Ok(ReserveManagerError::AlreadyInitialized))
+        );
     }
 
     #[test]
@@ -503,8 +510,9 @@ mod tests {
     fn test_negative_min_reserve_panics() {
         let s = setup();
         let rm = ReserveManagerClient::new(&s.env, &s.rm_addr);
-        assert!(rm
-            .try_set_min_reserve(&s.ta, &s.tb, &-1_i128, &0_i128)
-            .is_err());
+        assert_eq!(
+            rm.try_set_min_reserve(&s.ta, &s.tb, &-1_i128, &0_i128),
+            Err(Ok(ReserveManagerError::NegativeReserveAmount))
+        );
     }
 }
