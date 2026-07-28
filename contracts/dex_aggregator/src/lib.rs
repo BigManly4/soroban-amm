@@ -3,7 +3,7 @@
 //! DEX aggregator — routes trades across multiple AMM and CL pools for best execution.
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, vec, Address, Env, Vec,
 };
 
 use amm::AmmPoolClient;
