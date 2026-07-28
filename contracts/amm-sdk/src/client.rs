@@ -5,8 +5,6 @@
 //! binding (e.g. stellar-sdk-rs) can use the same types for argument / return
 //! value construction.
 
-#![no_std]
-
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env};
 
 use crate::types::{LiquidityQuote, PoolInfo, SdkAmmError, SwapInQuote, SwapOutQuote, SwapSimulation};
