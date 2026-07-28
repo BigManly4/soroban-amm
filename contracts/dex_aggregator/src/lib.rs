@@ -89,6 +89,7 @@ pub struct RouteQuote {
 
 #[contracttype]
 pub enum DataKey {
+    Admin,
     Factory,
     MaxHops,
     ClPools,
@@ -107,11 +108,12 @@ impl DexAggregator {
     pub const MIN_SQRT_PRICE: u128 = 4_295_128_739_u128;
     pub const MAX_SQRT_PRICE: u128 = 340_275_971_719_517_849_884_931_781_110_561_029_923_u128;
 
-    pub fn initialize(env: Env, factory: Address) {
+    pub fn initialize(env: Env, admin: Address, factory: Address) {
         assert!(
             !env.storage().instance().has(&DataKey::Factory),
             "already initialized"
         );
+        env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Factory, &factory);
         env.storage()
             .instance()
@@ -128,6 +130,9 @@ impl DexAggregator {
         token_b: Address,
         fee_bps: i128,
     ) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
         let mut cl_pools: Vec<ClPoolInfo> = env
             .storage()
             .instance()
@@ -148,6 +153,26 @@ impl DexAggregator {
             fee_bps,
         });
         env.storage().instance().set(&DataKey::ClPools, &cl_pools);
+    }
+
+    pub fn remove_cl_pool(env: Env, pool: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let mut cl_pools: Vec<ClPoolInfo> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ClPools)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for i in 0..cl_pools.len() {
+            let entry = cl_pools.get(i).unwrap();
+            if entry.pool == pool {
+                cl_pools.remove(i);
+                env.storage().instance().set(&DataKey::ClPools, &cl_pools);
+                return;
+            }
+        }
     }
 
     /// Find the best route up to `max_hops` pools deep (#319).
@@ -586,11 +611,14 @@ mod tests {
 
         let agg_addr = env.register_contract(None, DexAggregator);
         let agg = DexAggregatorClient::new(&env, &agg_addr);
-        agg.initialize(&factory_addr);
+        let agg_admin = Address::generate(&env);
+        agg.initialize(&agg_admin, &factory_addr);
 
         let token_a = Address::generate(&env);
         let token_b = Address::generate(&env);
         let cl_pool = Address::generate(&env);
+        
+        env.mock_all_auths();
         agg.register_cl_pool(&cl_pool, &token_a, &token_b, &30_i128);
 
         let tokens = DexAggregator::discover_tokens(&env, &factory);
