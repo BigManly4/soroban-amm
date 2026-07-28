@@ -339,7 +339,6 @@ impl TwalConsumer {
             cum_liquidity: cum,
             pool_ts: ledger_ts,
         };
-        };
         let key = DataKey::LiquiditySnapshot(pool.clone(), ledger_ts);
         env.storage().persistent().set(&key, &snapshot);
         env.storage().persistent().extend_ttl(
