@@ -7,15 +7,13 @@ members = [
   "contracts/router",
   "contracts/batch_router",
   "contracts/token",
-  "contracts/factory",
-  "contracts/router",
   "contracts/reserve_manager",
   "contracts/amm-fuzz",
   "contracts/twap_consumer",
   "contracts/governance",
   "contracts/staking",
   "contracts/integration-tests",
-]
+]  
 
 [workspace.dependencies]
 soroban-sdk = { version = "21.7.7" }
