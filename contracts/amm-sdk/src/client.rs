@@ -444,13 +444,13 @@ impl<'a> AmmPoolSdk<'a> {
         min_out: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        self.client.swap(
+        unwrap_contract_result(self.client.try_swap(
             trader,
             token_in,
             &amount_in,
             &min_out,
             &deadline,
-        )
+        ))
     }
 
     /// Execute a swap targeting an exact output amount.
@@ -462,13 +462,13 @@ impl<'a> AmmPoolSdk<'a> {
         max_in: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        self.client.swap_exact_out(
+        unwrap_contract_result(self.client.try_swap_exact_out(
             trader,
             token_out,
             &amount_out,
             &max_in,
             &deadline,
-        )
+        ))
     }
 
     /// Add liquidity to the pool.
@@ -480,13 +480,13 @@ impl<'a> AmmPoolSdk<'a> {
         min_shares: i128,
         deadline: u64,
     ) -> Result<i128, SdkAmmError> {
-        self.client.add_liquidity(
+        unwrap_contract_result(self.client.try_add_liquidity(
             provider,
             &amount_a,
             &amount_b,
             &min_shares,
             &deadline,
-        )
+        ))
     }
 
     /// Remove liquidity from the pool.
@@ -498,13 +498,13 @@ impl<'a> AmmPoolSdk<'a> {
         min_b: i128,
         deadline: u64,
     ) -> Result<(i128, i128), SdkAmmError> {
-        self.client.remove_liquidity(
+        unwrap_contract_result(self.client.try_remove_liquidity(
             provider,
             &shares,
             &min_a,
             &min_b,
             &deadline,
-        )
+        ))
     }
 
     /// Issue a flash loan.
@@ -515,12 +515,32 @@ impl<'a> AmmPoolSdk<'a> {
         amount_b: i128,
         data: Bytes,
     ) -> Result<(i128, i128), SdkAmmError> {
-        self.client.flash_loan(
+        unwrap_contract_result(self.client.try_flash_loan(
             receiver,
             &amount_a,
             &amount_b,
             &data,
-        )
+        ))
+    }
+}
+
+// ── Error propagation helper ────────────────────────────────────────────────
+
+/// Flatten a `try_*` client call into a plain `Result`.
+///
+/// `Err(Ok(e))` is a contract error the pool returned deliberately — that's
+/// the only case callers should branch on. The other arms (`Ok(Err(_))`
+/// decode failures and `Err(Err(_))` host invocation failures) indicate the
+/// call never reached a well-formed contract response, which callers cannot
+/// meaningfully recover from, so they panic like the non-`try_` client would.
+fn unwrap_contract_result<T>(
+    result: Result<Result<T, soroban_sdk::Error>, Result<SdkAmmError, soroban_sdk::InvokeError>>,
+) -> Result<T, SdkAmmError> {
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Err(Ok(err)) => Err(err),
+        Ok(Err(err)) => panic!("failed to decode contract result: {:?}", err),
+        Err(Err(err)) => panic!("host invocation failed: {:?}", err),
     }
 }
 
