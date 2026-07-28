@@ -2,7 +2,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
+};
 
 // Export compiled WASM for tests/dev usage when the `testutils` feature is enabled.
 #[cfg(feature = "testutils")]
@@ -22,16 +24,28 @@ pub enum DataKey {
     Symbol,
     Decimals,
     TotalSupply,
-    /// Historical balance checkpoints for governance snapshots.
     Checkpoints(Address),
+    PendingAdmin,
+    /// Set to `true` once an account's checkpoint history has been truncated by
+    /// the `MAX_CHECKPOINTS` eviction. Lets `balance_at` distinguish a genuine
+    /// pre-history zero balance from a queried ledger whose covering checkpoint
+    /// has been evicted.
+    CheckpointsTruncated(Address),
 }
 
-/// Balance recorded at a ledger sequence (used by `balance_at`).
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Checkpoint {
     pub ledger: u32,
     pub balance: i128,
+}
+
+/// SEP-41 allowance value.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AllowanceValue {
+    pub amount: i128,
+    pub live_until_ledger: u32,
 }
 
 #[contract]
@@ -39,6 +53,10 @@ pub struct LpToken;
 
 #[contractimpl]
 impl LpToken {
+    pub const MIN_TTL: u32 = 120_960;
+    pub const BUMP_TO: u32 = 2_419_200;
+    pub const MAX_CHECKPOINTS: u32 = 1024;
+
     /// Initialize the token with metadata and an admin that can mint/burn.
     ///
     /// `admin` is the only address authorized to call `mint` and `burn`.
@@ -91,32 +109,96 @@ impl LpToken {
             .unwrap_or(0)
     }
 
-    /// Returns the balance of `id` at or before `ledger` (for governance snapshots).
+    /// Returns the account balance at or before `ledger`.
+    ///
+    /// Panics if `ledger` predates the oldest retained checkpoint *and* the
+    /// account's history has been truncated by `MAX_CHECKPOINTS` eviction: the
+    /// true balance at that ledger is no longer recoverable, so erroring is
+    /// preferred over silently returning an incorrect (possibly zero) value
+    /// that would corrupt governance snapshots.
     pub fn balance_at(env: Env, id: Address, ledger: u32) -> i128 {
+        let key = DataKey::Checkpoints(id.clone());
         let checkpoints: Vec<Checkpoint> = env
             .storage()
             .persistent()
-            .get(&DataKey::Checkpoints(id))
-            .unwrap_or(Vec::new(&env));
-        let mut result = 0_i128;
-        for i in 0..checkpoints.len() {
-            let cp = checkpoints.get(i).unwrap();
-            if cp.ledger <= ledger {
-                result = cp.balance;
-            } else {
-                break;
-            }
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let len = checkpoints.len();
+        if len == 0 {
+            return 0;
         }
-        result
-    }
-
-    /// Returns the amount `spender` is allowed to transfer on behalf of `from`.
-    /// Returns `0` if no allowance has been set.
-    pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
         env.storage()
             .persistent()
-            .get(&DataKey::Allowance(from, spender))
-            .unwrap_or(0)
+            .extend_ttl(&key, Self::MIN_TTL, Self::BUMP_TO);
+
+        // The truncation flag is written only inside the eviction branch, which
+        // fires exclusively once the list has reached `MAX_CHECKPOINTS` (and the
+        // list then stays at capacity). Below capacity the flag is provably
+        // absent, so we skip the storage read entirely and only probe — and keep
+        // its TTL in lockstep with the checkpoints it guards — when a query could
+        // actually have been truncated.
+        let truncated: bool = if len >= Self::MAX_CHECKPOINTS {
+            let trunc_key = DataKey::CheckpointsTruncated(id);
+            let t: bool = env.storage().persistent().get(&trunc_key).unwrap_or(false);
+            if t {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&trunc_key, Self::MIN_TTL, Self::BUMP_TO);
+            }
+            t
+        } else {
+            false
+        };
+
+        let mut low = 0;
+        let mut high = len;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let checkpoint = checkpoints.get(mid).unwrap();
+            if checkpoint.ledger <= ledger {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        if low == 0 {
+            // The queried ledger precedes every surviving checkpoint. If this
+            // account's history was truncated, the checkpoint that actually
+            // covered `ledger` may have been evicted — we cannot honestly
+            // answer, so error instead of returning a bogus 0.
+            if truncated {
+                panic!(
+                    "balance_at: ledger {ledger} predates retained checkpoint history \
+                     (evicted at MAX_CHECKPOINTS); balance unavailable"
+                );
+            }
+            0
+        } else {
+            checkpoints.get(low - 1).unwrap().balance
+        }
+    }
+
+    /// Returns the SEP-41 allowance value for `spender` over `from`.
+    /// Returns `{ amount: 0, live_until_ledger: 0 }` if expired or unset.
+    pub fn allowance(env: Env, from: Address, spender: Address) -> AllowanceValue {
+        let key = DataKey::Allowance(from, spender);
+        let val: AllowanceValue = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(AllowanceValue {
+                amount: 0,
+                live_until_ledger: 0,
+            });
+        if val.amount > 0 && env.ledger().sequence() > val.live_until_ledger {
+            AllowanceValue {
+                amount: 0,
+                live_until_ledger: 0,
+            }
+        } else {
+            val
+        }
     }
 
     // ── Write ─────────────────────────────────────────────────────────────────
@@ -126,6 +208,7 @@ impl LpToken {
     /// Requires authorization from `from`.
     /// Panics if `from` has insufficient balance.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        assert!(amount > 0, "amount must be positive");
         from.require_auth();
         Self::_transfer(&env, &from, &to, amount);
     }
@@ -136,15 +219,20 @@ impl LpToken {
     /// Panics if the current allowance of `spender` over `from` is less than `amount`.
     /// Panics if `from` has insufficient balance.
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        assert!(amount > 0, "amount must be positive");
         spender.require_auth();
         let allowance = Self::allowance(env.clone(), from.clone(), spender.clone());
         assert!(
-            allowance >= amount,
-            "insufficient allowance: available={allowance}, requested={amount}"
+            allowance.amount >= amount,
+            "insufficient allowance: available={}, requested={amount}",
+            allowance.amount
         );
         env.storage().persistent().set(
             &DataKey::Allowance(from.clone(), spender),
-            &(allowance - amount),
+            &AllowanceValue {
+                amount: allowance.amount - amount,
+                live_until_ledger: allowance.live_until_ledger,
+            },
         );
         Self::_transfer(&env, &from, &to, amount);
     }
@@ -152,16 +240,35 @@ impl LpToken {
     /// Approve `spender` to transfer up to `amount` tokens on behalf of `from`.
     ///
     /// Requires authorization from `from`.
+    /// `live_until_ledger` must be >= current ledger sequence when `amount > 0`.
     /// Setting `amount` to `0` effectively revokes the allowance.
-    pub fn approve(env: Env, from: Address, spender: Address, amount: i128) {
+    pub fn approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        live_until_ledger: u32,
+    ) {
         from.require_auth();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Allowance(from, spender), &amount);
+        assert!(amount >= 0, "amount must be non-negative");
+        if amount > 0 {
+            assert!(
+                live_until_ledger >= env.ledger().sequence(),
+                "live_until_ledger must be >= current ledger"
+            );
+        }
+        env.storage().persistent().set(
+            &DataKey::Allowance(from, spender),
+            &AllowanceValue {
+                amount,
+                live_until_ledger,
+            },
+        );
     }
 
     /// Mint new tokens — admin only (called by the AMM contract).
     pub fn mint(env: Env, to: Address, amount: i128) {
+        assert!(amount > 0, "amount must be positive");
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         let supply: i128 = Self::total_supply(env.clone());
@@ -177,21 +284,24 @@ impl LpToken {
 
     /// Burn tokens — admin only (called by the AMM contract).
     pub fn burn(env: Env, from: Address, amount: i128) {
+        assert!(amount > 0, "amount must be positive");
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         let bal = Self::balance(env.clone(), from.clone());
+        let locked = Self::locked_balance(env.clone(), from.clone());
         assert!(
-            bal >= amount,
-            "insufficient balance: available={bal}, requested={amount}"
+            bal - locked >= amount,
+            "insufficient unlocked balance: available={}, requested={amount}",
+            bal - locked
         );
         env.storage()
             .persistent()
             .set(&DataKey::Balance(from.clone()), &(bal - amount));
+        Self::write_checkpoint(&env, &from);
         let supply: i128 = Self::total_supply(env.clone());
         env.storage()
             .instance()
             .set(&DataKey::TotalSupply, &(supply - amount));
-        Self::write_checkpoint(&env, &from);
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
@@ -204,6 +314,37 @@ impl LpToken {
     /// Address allowed to lock/unlock balances (governance).
     pub fn locker(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Locker).unwrap()
+    }
+
+    /// Nominate a new admin. The nominee must call `accept_admin` to complete rotation.
+    pub fn propose_admin(env: Env, current_admin: Address, new_admin: Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert!(admin == current_admin, "current_admin is not admin");
+        current_admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &Some(new_admin.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "admin_nominated"),),
+            (current_admin, new_admin),
+        );
+    }
+
+    /// Accept a pending admin nomination.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or(None);
+        assert!(pending == Some(new_admin.clone()), "not pending admin");
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &Option::<Address>::None);
+        env.events()
+            .publish((Symbol::new(&env, "admin_transferred"),), (new_admin,));
     }
 
     /// Replace the contract WASM with a new version. Admin-only.
@@ -263,6 +404,7 @@ impl LpToken {
     }
 
     fn _transfer(env: &Env, from: &Address, to: &Address, amount: i128) {
+        assert!(amount > 0, "amount must be positive");
         let from_bal = Self::balance(env.clone(), from.clone());
         let locked = Self::locked_balance(env.clone(), from.clone());
         assert!(
@@ -273,11 +415,11 @@ impl LpToken {
         env.storage()
             .persistent()
             .set(&DataKey::Balance(from.clone()), &(from_bal - amount));
+        Self::write_checkpoint(env, from);
         let to_bal = Self::balance(env.clone(), to.clone());
         env.storage()
             .persistent()
             .set(&DataKey::Balance(to.clone()), &(to_bal + amount));
-        Self::write_checkpoint(env, from);
         Self::write_checkpoint(env, to);
         env.events().publish(
             (Symbol::new(env, "transfer"), from.clone()),
@@ -286,22 +428,73 @@ impl LpToken {
     }
 
     fn write_checkpoint(env: &Env, account: &Address) {
-        let ledger = env.ledger().sequence();
         let balance = Self::balance(env.clone(), account.clone());
         let key = DataKey::Checkpoints(account.clone());
+        let ledger = env.ledger().sequence();
         let mut checkpoints: Vec<Checkpoint> = env
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or(Vec::new(env));
-        if checkpoints.len() > 0 {
-            let last = checkpoints.get(checkpoints.len() - 1).unwrap();
+            .unwrap_or_else(|| Vec::new(env));
+
+        let len = checkpoints.len();
+        if len > 0 {
+            let last_idx = len - 1;
+            let mut last = checkpoints.get(last_idx).unwrap();
             if last.ledger == ledger {
-                checkpoints.pop_back();
+                last.balance = balance;
+                checkpoints.set(last_idx, last);
+                env.storage().persistent().set(&key, &checkpoints);
+                Self::bump_checkpoint_ttl(env, account, checkpoints.len());
+                return;
+            }
+        }
+
+        if checkpoints.len() >= Self::MAX_CHECKPOINTS {
+            checkpoints.remove(0);
+            // Record that the oldest history has been dropped so `balance_at`
+            // errors on queries it can no longer answer accurately rather than
+            // silently returning a wrong balance. A truncated account stays at
+            // MAX_CHECKPOINTS forever, so every later distinct-ledger write
+            // re-enters this branch; extending the flag's TTL here (together
+            // with `balance_at` doing the same on reads) keeps it alive in
+            // lockstep with the checkpoints it guards, without adding any cost
+            // to the common, non-truncated write path.
+            let trunc_key = DataKey::CheckpointsTruncated(account.clone());
+            if !env.storage().persistent().has(&trunc_key) {
+                env.storage().persistent().set(&trunc_key, &true);
             }
         }
         checkpoints.push_back(Checkpoint { ledger, balance });
         env.storage().persistent().set(&key, &checkpoints);
+        Self::bump_checkpoint_ttl(env, account, checkpoints.len());
+    }
+
+    /// Extends the TTL of an account's checkpoint list and, when present, its
+    /// truncation flag, keeping the two entries alive together so `balance_at`
+    /// never sees checkpoints without the flag that guards them.
+    ///
+    /// `checkpoint_count` is the post-write length of the list. The truncation
+    /// flag can only exist once the list has reached `MAX_CHECKPOINTS` (it is set
+    /// exclusively in the eviction branch, after which the list stays at
+    /// capacity), so below capacity the flag is provably absent and we skip the
+    /// storage probe entirely — keeping the common write path free of the extra
+    /// read that would otherwise run on every checkpoint.
+    fn bump_checkpoint_ttl(env: &Env, account: &Address, checkpoint_count: u32) {
+        env.storage().persistent().extend_ttl(
+            &DataKey::Checkpoints(account.clone()),
+            Self::MIN_TTL,
+            Self::BUMP_TO,
+        );
+        if checkpoint_count < Self::MAX_CHECKPOINTS {
+            return;
+        }
+        let trunc_key = DataKey::CheckpointsTruncated(account.clone());
+        if env.storage().persistent().has(&trunc_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&trunc_key, Self::MIN_TTL, Self::BUMP_TO);
+        }
     }
 }
 
@@ -310,7 +503,10 @@ impl LpToken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Env,
+    };
 
     struct TestSetup {
         env: Env,
@@ -409,13 +605,57 @@ mod tests {
         let carol = Address::generate(&ts.env);
 
         client.mint(&alice, &1_000_i128);
-        client.approve(&alice, &bob, &300_i128);
-        assert_eq!(client.allowance(&alice, &bob), 300);
+        let live_until = ts.env.ledger().sequence() + 100;
+        client.approve(&alice, &bob, &300_i128, &live_until);
+        assert_eq!(client.allowance(&alice, &bob).amount, 300);
 
         client.transfer_from(&bob, &alice, &carol, &200_i128);
         assert_eq!(client.balance(&alice), 800);
         assert_eq!(client.balance(&carol), 200);
-        assert_eq!(client.allowance(&alice, &bob), 100);
+        assert_eq!(client.allowance(&alice, &bob).amount, 100);
+    }
+
+    #[test]
+    fn test_allowance_expires() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        let bob = Address::generate(&ts.env);
+
+        client.mint(&alice, &1_000_i128);
+        let live_until = ts.env.ledger().sequence() + 5;
+        client.approve(&alice, &bob, &300_i128, &live_until);
+        assert_eq!(client.allowance(&alice, &bob).amount, 300);
+
+        // Advance past expiry
+        ts.env
+            .ledger()
+            .with_mut(|l| l.sequence_number = live_until + 1);
+        assert_eq!(client.allowance(&alice, &bob).amount, 0);
+    }
+
+    #[test]
+    fn test_approve_past_ledger_panics() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        let bob = Address::generate(&ts.env);
+        // Advance past genesis so `past` is genuinely an earlier ledger than the current one.
+        ts.env.ledger().with_mut(|l| l.sequence_number = 100);
+        let past = ts.env.ledger().sequence() - 1;
+        assert!(client.try_approve(&alice, &bob, &100_i128, &past).is_err());
+    }
+
+    #[test]
+    fn test_approve_negative_amount_panics() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        let bob = Address::generate(&ts.env);
+        let live_until = ts.env.ledger().sequence() + 100;
+        assert!(client
+            .try_approve(&alice, &bob, &-100_i128, &live_until)
+            .is_err());
     }
 
     #[test]
@@ -427,7 +667,8 @@ mod tests {
         let carol = Address::generate(&ts.env);
 
         client.mint(&alice, &1_000_i128);
-        client.approve(&alice, &bob, &50_i128);
+        let live_until = ts.env.ledger().sequence() + 100;
+        client.approve(&alice, &bob, &50_i128, &live_until);
         let result = client.try_transfer_from(&bob, &alice, &carol, &100_i128);
         assert!(result.is_err());
     }
@@ -442,21 +683,103 @@ mod tests {
     }
 
     #[test]
-    fn test_balance_at_snapshot() {
+    fn test_balance_at_uses_checkpoints() {
         let ts = setup();
         let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
         let alice = Address::generate(&ts.env);
         let bob = Address::generate(&ts.env);
 
+        ts.env.ledger().set_sequence_number(10);
         client.mint(&alice, &1_000_i128);
-        let ledger_after_mint = ts.env.ledger().sequence();
-        // Advance the ledger so the transfer checkpoint lands at a different sequence,
-        // preserving the mint snapshot at ledger_after_mint.
-        ts.env.ledger().with_mut(|l| l.sequence_number += 1);
-        client.transfer(&alice, &bob, &400_i128);
+        ts.env.ledger().set_sequence_number(20);
+        client.transfer(&alice, &bob, &250_i128);
+        ts.env.ledger().set_sequence_number(30);
+        client.burn(&alice, &100_i128);
 
-        assert_eq!(client.balance_at(&alice, &ledger_after_mint), 1_000);
-        assert_eq!(client.balance(&alice), 600);
+        assert_eq!(client.balance_at(&alice, &9_u32), 0);
+        assert_eq!(client.balance_at(&alice, &10_u32), 1_000);
+        assert_eq!(client.balance_at(&alice, &25_u32), 750);
+        assert_eq!(client.balance_at(&alice, &30_u32), 650);
+        assert_eq!(client.balance_at(&bob, &19_u32), 0);
+        assert_eq!(client.balance_at(&bob, &20_u32), 250);
+    }
+
+    /// Mints an early balance for a fresh account, then generates enough
+    /// distinct-ledger balance changes to overflow `MAX_CHECKPOINTS`, evicting
+    /// the earliest checkpoint. The early checkpoint is written at ledger 100.
+    fn mint_until_truncated(ts: &TestSetup) -> Address {
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+
+        ts.env.ledger().set_sequence_number(100);
+        client.mint(&alice, &1_000_i128);
+
+        // One checkpoint already exists (ledger 100). Pushing MAX_CHECKPOINTS
+        // more at distinct increasing ledgers forces at least one eviction,
+        // dropping the ledger-100 checkpoint.
+        let start = 101u32;
+        for i in 0..LpToken::MAX_CHECKPOINTS {
+            ts.env.ledger().set_sequence_number(start + i);
+            client.mint(&alice, &1_i128);
+        }
+        alice
+    }
+
+    #[test]
+    fn test_balance_at_errors_when_history_truncated() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = mint_until_truncated(&ts);
+
+        // The checkpoint recording alice's balance at ledger 100 has been
+        // evicted. Querying it must error instead of silently returning 0,
+        // which would zero out her governance snapshot voting power.
+        assert!(client.try_balance_at(&alice, &100_u32).is_err());
+    }
+
+    #[test]
+    fn test_balance_at_within_window_ok_after_truncation() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = mint_until_truncated(&ts);
+
+        // Ledgers still covered by surviving checkpoints resolve correctly:
+        // eviction only drops the front, so the retained tail stays accurate.
+        // Ledger 101 was the first loop mint (1_000 + 1 = 1_001).
+        assert_eq!(client.balance_at(&alice, &101_u32), 1_001);
+        // Final checkpoint: 1_000 + MAX_CHECKPOINTS increments of 1.
+        let last_ledger = 101 + LpToken::MAX_CHECKPOINTS - 1;
+        assert_eq!(
+            client.balance_at(&alice, &last_ledger),
+            1_000 + LpToken::MAX_CHECKPOINTS as i128
+        );
+    }
+
+    #[test]
+    fn test_balance_at_pre_history_zero_not_truncated() {
+        // Without truncation, a query before the first checkpoint is a genuine
+        // zero and must not panic.
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        ts.env.ledger().set_sequence_number(50);
+        client.mint(&alice, &1_000_i128);
+        assert_eq!(client.balance_at(&alice, &49_u32), 0);
+    }
+
+    #[test]
+    fn test_transfer_admin_requires_nominee_acceptance() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let nominee = Address::generate(&ts.env);
+        let stranger = Address::generate(&ts.env);
+
+        client.propose_admin(&ts.admin, &nominee);
+        assert_eq!(client.admin(), ts.admin);
+        assert!(client.try_accept_admin(&stranger).is_err());
+
+        client.accept_admin(&nominee);
+        assert_eq!(client.admin(), nominee);
     }
 
     #[test]
@@ -480,5 +803,32 @@ mod tests {
         client.transfer(&alice, &bob, &700_i128);
         assert_eq!(client.balance(&alice), 0);
         assert_eq!(client.balance(&bob), 1_000);
+    }
+
+    #[test]
+    fn test_burn_blocked_by_lock() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        let locker = Address::generate(&ts.env);
+
+        client.set_locker(&locker);
+        client.mint(&alice, &1_000_i128);
+        client.lock(&alice, &700_i128);
+        assert_eq!(client.locked_balance(&alice), 700);
+
+        // Burning more than the unlocked (300) portion must fail, even though
+        // the gross balance (1000) would otherwise cover it.
+        assert!(client.try_burn(&alice, &400_i128).is_err());
+        assert_eq!(client.balance(&alice), 1_000);
+
+        // Burning up to the unlocked amount still works.
+        client.burn(&alice, &300_i128);
+        assert_eq!(client.balance(&alice), 700);
+        assert_eq!(client.locked_balance(&alice), 700);
+
+        client.unlock(&alice, &700_i128);
+        client.burn(&alice, &700_i128);
+        assert_eq!(client.balance(&alice), 0);
     }
 }

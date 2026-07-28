@@ -16,8 +16,10 @@ testutils = [
 [dependencies]
 soroban-sdk = { workspace = true }
 amm = { path = "../amm" }
+factory = { path = "../factory" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 amm = { path = "../amm", features = ["testutils"] }
 token = { path = "../token", features = ["testutils"] }
+factory = { path = "../factory", features = ["testutils"] }

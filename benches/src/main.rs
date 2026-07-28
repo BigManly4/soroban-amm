@@ -318,7 +318,12 @@ fn assert_within(name: &str, key: &str, current: u64, baseline: u64) -> Result<(
     let allowed = (baseline as u128) * (10_000 + REGRESSION_BPS) / 10_000;
     if (current as u128) > allowed {
         return Err(format!(
-            "{name} {key} regressed: current {current}, baseline {baseline}, allowed {allowed}"
+            "{name} {key} regressed: current {current}, baseline {baseline}, allowed {allowed}\n\
+             \n\
+             If this increase is expected (e.g. a storage/TTL change to a hot-path\n\
+             contract), regenerate the baseline and commit it in THIS pull request:\n\
+             \x20   cargo run -p benches -- --write-baseline\n\
+             Otherwise, your change made {name} slower than intended — investigate before merging."
         ));
     }
     Ok(())

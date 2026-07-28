@@ -297,7 +297,7 @@ export class ConcentratedLiquidityClient {
 
   /**
    * Parameters for `modify_position(provider, lower_tick, upper_tick,
-   * liquidity_delta, min_a, min_b)`.
+   * liquidity_delta, min_a, min_b, deadline)`.
    * Returns `(amount_a, amount_b)`.
    */
   modifyPositionParams(
@@ -306,9 +306,10 @@ export class ConcentratedLiquidityClient {
     upperTick: number,
     liquidityDelta: bigint,
     minA: bigint,
-    minB: bigint
+    minB: bigint,
+    deadline: bigint
   ): xdr.ScVal[] {
-    return [addr(provider), i32(lowerTick), i32(upperTick), i128(liquidityDelta), i128(minA), i128(minB)];
+    return [addr(provider), i32(lowerTick), i32(upperTick), i128(liquidityDelta), i128(minA), i128(minB), u64(deadline)];
   }
 
   /**
