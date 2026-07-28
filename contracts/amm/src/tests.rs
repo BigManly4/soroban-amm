@@ -344,11 +344,7 @@ pub(crate) struct RemoveLiquidity<'a> {
 }
 
 impl<'a> RemoveLiquidity<'a> {
-    pub(crate) fn new(
-        amm: &'a AmmPoolClient<'a>,
-        provider: &'a Address,
-        shares: i128,
-    ) -> Self {
+    pub(crate) fn new(amm: &'a AmmPoolClient<'a>, provider: &'a Address, shares: i128) -> Self {
         Self {
             amm,
             provider,
@@ -457,19 +453,31 @@ fn test_set_protocol_fee_rejects_full_capture() {
 
     // protocol_fee_bps == fee_bps (30) must be rejected (M-02 fix).
     let result = amm.try_set_protocol_fee(&admin, &fee_recipient, &30_i128);
-    assert!(result.is_err(), "protocol_fee_bps == fee_bps must be rejected");
+    assert!(
+        result.is_err(),
+        "protocol_fee_bps == fee_bps must be rejected"
+    );
 
     // protocol_fee_bps > fee_bps must still be rejected.
     let result2 = amm.try_set_protocol_fee(&admin, &fee_recipient, &31_i128);
-    assert!(result2.is_err(), "protocol_fee_bps > fee_bps must be rejected");
+    assert!(
+        result2.is_err(),
+        "protocol_fee_bps > fee_bps must be rejected"
+    );
 
     // A valid strict value (29) must still be accepted.
     let result3 = amm.try_set_protocol_fee(&admin, &fee_recipient, &29_i128);
-    assert!(result3.is_ok(), "protocol_fee_bps < fee_bps must be accepted");
+    assert!(
+        result3.is_ok(),
+        "protocol_fee_bps < fee_bps must be accepted"
+    );
 
     // Zero protocol fee must always be accepted regardless of fee_bps.
     let result4 = amm.try_set_protocol_fee(&admin, &fee_recipient, &0_i128);
-    assert!(result4.is_ok(), "protocol_fee_bps == 0 must always be accepted");
+    assert!(
+        result4.is_ok(),
+        "protocol_fee_bps == 0 must always be accepted"
+    );
 }
 
 #[test]
@@ -708,8 +716,8 @@ fn test_swap_exact_out_normal_path() {
     let trader = Address::generate(env);
     ta_sac.mint(&trader, &(required_in + 1_000));
 
-    let spent = SwapExactOut::new(&amm, &trader, &ts.tb_addr, want_out, required_in + 1_000)
-        .execute();
+    let spent =
+        SwapExactOut::new(&amm, &trader, &ts.tb_addr, want_out, required_in + 1_000).execute();
 
     assert_eq!(spent, required_in);
     let info = amm.get_info();
@@ -1056,8 +1064,7 @@ fn test_swap_emits_token_out_in_event_payload() {
     let swap_event = events
         .iter()
         .find(|e| {
-            e.0 == amm.address
-                && e.1 == (Symbol::new(env, "swap"), trader.clone()).into_val(env)
+            e.0 == amm.address && e.1 == (Symbol::new(env, "swap"), trader.clone()).into_val(env)
         })
         .expect("swap event not found");
 
@@ -1533,13 +1540,8 @@ fn test_remove_liquidity_one_sided() {
 
     // Remove one-sided: provider wants only token_a.
     // min_out = 1_000_000 ensures at least the proportional withdrawal.
-    let total_out = amm.remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &1_000_000_i128,
-        &u64::MAX,
-    );
+    let total_out =
+        amm.remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &1_000_000_i128, &u64::MAX);
 
     let ta_after = ta_client.balance(&provider);
     let tb_after = tb_client.balance(&provider);
@@ -1575,13 +1577,8 @@ fn test_remove_liquidity_one_sided_slippage_fails() {
     let shares = AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
 
     // min_out set impossibly high — must fail.
-    let result = amm.try_remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &i128::MAX,
-        &u64::MAX,
-    );
+    let result =
+        amm.try_remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &i128::MAX, &u64::MAX);
     assert!(result.is_err());
 }
 
@@ -1609,13 +1606,8 @@ fn test_remove_liquidity_one_sided_circuit_breaker() {
     Swap::new(&amm, &trader, &ts.ta_addr, 5_000_000).execute();
 
     // Now attempting a large remove_liquidity_one_sided in the same ledger sequence will trip circuit breaker.
-    let res = amm.try_remove_liquidity_one_sided(
-        &provider,
-        &shares,
-        &ts.ta_addr,
-        &1_i128,
-        &u64::MAX,
-    );
+    let res =
+        amm.try_remove_liquidity_one_sided(&provider, &shares, &ts.ta_addr, &1_i128, &u64::MAX);
     assert!(res.is_err());
 }
 
@@ -1665,4 +1657,140 @@ fn bench_add_liquidity_cost() {
     AddLiquidity::new(&amm, &provider, 500_000, 500_000).execute();
     std::println!("=== ADD_LIQ BUDGET ===");
     std::println!("{}", env.budget());
+}
+
+// ── Issue: multisig proposal expiry must not be refreshed by an already-approved signer ──
+//
+// `propose_emergency_withdraw` previously reset `MultisigProposalExpiresAt` to
+// `now + MULTISIG_PROPOSAL_TTL_SECS` on *every* call, even when the calling signer
+// had already approved the same recipient and no new approval was added. That let a
+// single signer keep a stuck proposal (e.g. 1 of 3 required approvals) alive forever
+// by periodically re-proposing, defeating `ProposalExpired` as a freshness check.
+//
+// The fix only refreshes the expiry when a *new* approval is recorded.
+
+#[test]
+fn test_multisig_reproposal_by_approved_signer_does_not_extend_expiry() {
+    let ts = setup_pool(30);
+    let env = &ts.env;
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    // Seed the pool with reserves so an emergency withdrawal would have funds.
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &1_000_000_i128);
+    tb_sac.mint(&provider, &1_000_000_i128);
+    AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
+
+    let a = Address::generate(env);
+    let b = Address::generate(env);
+    let c = Address::generate(env);
+    let recipient = Address::generate(env);
+    let signers = soroban_sdk::Vec::from_array(env, [a.clone(), b.clone(), c.clone()]);
+    amm.set_multisig(&ts.admin, &signers, &2u32);
+
+    const TTL: u64 = 7 * 24 * 60 * 60; // mirrors MULTISIG_PROPOSAL_TTL_SECS
+    let t0 = 100_000_u64;
+    env.ledger().set_timestamp(t0);
+
+    // Signer `a` opens the proposal. Expiry = t0 + TTL, approvals = [a].
+    amm.propose_emergency_withdraw(&a, &recipient);
+    assert_eq!(amm.get_multisig_proposal().unwrap().approvals.len(), 1);
+
+    // Six days later the *already-approved* signer `a` re-proposes the SAME
+    // recipient. This adds no new approval and, with the fix, must NOT extend
+    // the expiry beyond the original t0 + TTL.
+    let t1 = t0 + 6 * 24 * 60 * 60;
+    env.ledger().set_timestamp(t1);
+    amm.propose_emergency_withdraw(&a, &recipient);
+    assert_eq!(
+        amm.get_multisig_proposal().unwrap().approvals.len(),
+        1,
+        "re-proposing signer must not be double-counted"
+    );
+
+    // Advance just past the ORIGINAL expiry (t0 + TTL). Note t2 < t1 + TTL, so if
+    // the re-propose had (incorrectly) refreshed the window, execution would instead
+    // fail with InsufficientShares (1 < 2). ProposalExpired proves the window was
+    // NOT extended by the already-approved signer.
+    let t2 = t0 + TTL + 1;
+    env.ledger().set_timestamp(t2);
+    let result = amm.try_exec_multisig_emergency_wd(&b);
+    assert_eq!(
+        result,
+        Err(Ok(AmmError::ProposalExpired)),
+        "a stale proposal must lapse; an already-approved signer cannot keep it alive"
+    );
+}
+
+#[test]
+fn test_multisig_new_cosigner_refreshes_window_and_quorum_executes() {
+    let ts = setup_pool(30);
+    let env = &ts.env;
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    // Seed the pool with reserves.
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &1_000_000_i128);
+    tb_sac.mint(&provider, &1_000_000_i128);
+    AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
+
+    let a = Address::generate(env);
+    let b = Address::generate(env);
+    let c = Address::generate(env);
+    let recipient = Address::generate(env);
+    let signers = soroban_sdk::Vec::from_array(env, [a.clone(), b.clone(), c.clone()]);
+    amm.set_multisig(&ts.admin, &signers, &2u32);
+
+    let token_a = StellarTokenClient::new(env, &ts.ta_addr);
+    let token_b = StellarTokenClient::new(env, &ts.tb_addr);
+    let pool_a_before = token_a.balance(&ts.amm_addr);
+    let pool_b_before = token_b.balance(&ts.amm_addr);
+    let recip_a_before = token_a.balance(&recipient);
+    let recip_b_before = token_b.balance(&recipient);
+    assert!(pool_a_before > 0 && pool_b_before > 0);
+
+    const TTL: u64 = 7 * 24 * 60 * 60;
+    let t0 = 100_000_u64;
+    env.ledger().set_timestamp(t0);
+
+    // Signer `a` opens the proposal: approvals = [a], expiry = t0 + TTL.
+    amm.propose_emergency_withdraw(&a, &recipient);
+
+    // A genuinely NEW signer `b` co-signs six days later. This is real progress
+    // toward quorum and (preserved behavior) refreshes the window to t1 + TTL.
+    let t1 = t0 + 6 * 24 * 60 * 60;
+    env.ledger().set_timestamp(t1);
+    amm.propose_emergency_withdraw(&b, &recipient);
+    assert_eq!(amm.get_multisig_proposal().unwrap().approvals.len(), 2);
+
+    // Past the ORIGINAL expiry but inside the refreshed window (t2 < t1 + TTL).
+    // Quorum (2) is met, so execution must succeed and drain reserves to recipient.
+    let t2 = t0 + TTL + 1;
+    env.ledger().set_timestamp(t2);
+    amm.exec_multisig_emergency_wd(&a);
+
+    assert_eq!(
+        token_a.balance(&ts.amm_addr),
+        0,
+        "reserve_a should be drained"
+    );
+    assert_eq!(
+        token_b.balance(&ts.amm_addr),
+        0,
+        "reserve_b should be drained"
+    );
+    assert_eq!(
+        token_a.balance(&recipient),
+        recip_a_before + pool_a_before,
+        "recipient should receive token_a reserves"
+    );
+    assert_eq!(
+        token_b.balance(&recipient),
+        recip_b_before + pool_b_before,
+        "recipient should receive token_b reserves"
+    );
 }
