@@ -1902,7 +1902,7 @@ impl ConcentratedLiquidity {
             env.storage()
                 .instance()
                 .set(&DataKey::LastOracleTimestamp, &now);
-            Self::record_oracle_point(env, now, new_cum);
+            Self::record_oracle_point(&env, now, new_cum);
         }
 
         let fee_bps: i128 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
