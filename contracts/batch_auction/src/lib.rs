@@ -41,6 +41,8 @@ pub enum AuctionError {
     InvalidMaxOrders = 9,
     /// `token_in`/`token_out` do not match the pool's token pair (issue #361).
     InvalidPoolTokenPair = 10,
+    /// Token transfer to/from a trader failed (issue #546).
+    TransferFailed = 11,
 }
 
 // ── Storage types ─────────────────────────────────────────────────────────────
@@ -245,24 +247,27 @@ impl BatchAuction {
             return Err(AuctionError::ZeroAmount);
         }
 
-        // Validate the order's tokens against the pool's actual pair up front.
-        // If a mismatched pair slipped through, settle_batch would call swap
-        // with the wrong tokens and panic; since settlement is atomic, that
+        // Validate the order's tokens against the primary pool's actual pair up
+        // front. If a mismatched pair slipped through, settle_batch would call
+        // swap with the wrong tokens and panic; since settlement is atomic, that
         // panic reverts the whole batch and locks every other trader's escrow
         // until each order is cancelled individually (issue #361). AMM and CL
         // pools expose their token pair through different interfaces, so the
         // lookup must branch on pool_type (issue #470).
-        let (pool_token_a, pool_token_b) = match pool_type {
-            PoolType::Amm => {
-                let info = AmmPoolClient::new(&env, &pool).get_info();
-                (info.token_a, info.token_b)
-            }
-            PoolType::Cl => ConcentratedLiquidityClient::new(&env, &pool).get_tokens(),
-        };
-        let valid_pair = (token_in == pool_token_a && token_out == pool_token_b)
-            || (token_in == pool_token_b && token_out == pool_token_a);
-        if !valid_pair {
+        if !Self::pool_matches_pair(&env, &pool, pool_type, &token_in, &token_out) {
             return Err(AuctionError::InvalidPoolTokenPair);
+        }
+        // An alternate venue must trade the same pair as the primary venue.
+        // Otherwise best-venue routing could quote and select a real pool over
+        // `token_in -> token_x`, causing settlement to receive the wrong asset.
+        if let Some(ref alt) = alt_pool {
+            let alt_type = match pool_type {
+                PoolType::Amm => PoolType::Cl,
+                PoolType::Cl => PoolType::Amm,
+            };
+            if !Self::pool_matches_pair(&env, alt, alt_type, &token_in, &token_out) {
+                return Err(AuctionError::InvalidPoolTokenPair);
+            }
         }
 
         let mut pending: Vec<u64> = env
@@ -384,6 +389,13 @@ impl BatchAuction {
     /// and it is dropped from the batch — instead of reverting the whole
     /// settlement and freezing every other trader's escrow.
     ///
+    /// Token transfers (payout on success, refund on failure/expiry) are also
+    /// isolated via `try_transfer` (issue #546): a single trader's inability
+    /// to receive tokens — no trustline, insufficient limit, frozen/revoked
+    /// SAC authorization, clawback-enabled asset — does not revert the entire
+    /// batch. The failing order is logged as `order_failed` and settlement
+    /// continues with the remaining orders.
+    ///
     /// Returns the output amounts for each order that settled successfully,
     /// in submission order. Orders that failed and were refunded are omitted;
     /// callers should compare against [`get_pending_orders`] before and after
@@ -434,17 +446,23 @@ impl BatchAuction {
             // settlement time, expire the order and refund its escrow rather
             // than silently substituting a freshly-computed deadline.
             if now > order.deadline {
-                SepTokenClient::new(&env, &order.token_in).transfer(
-                    &auction_addr,
-                    &order.trader,
-                    &order.amount_in,
-                );
-                results.push_back(0);
+                let refund_ok = SepTokenClient::new(&env, &order.token_in)
+                    .try_transfer(&auction_addr, &order.trader, &order.amount_in)
+                    .ok()
+                    .and_then(|r| r.ok());
+                if refund_ok.is_none() {
+                    env.events().publish(
+                        (Symbol::new(&env, "order_failed"), order.trader.clone()),
+                        (order_id,),
+                    );
+                } else {
+                    results.push_back(0);
+                    env.events().publish(
+                        (Symbol::new(&env, "order_expired"), order.trader.clone()),
+                        (order_id,),
+                    );
+                }
                 env.storage().instance().remove(&DataKey::Order(order_id));
-                env.events().publish(
-                    (Symbol::new(&env, "order_expired"), order.trader.clone()),
-                    (order_id,),
-                );
                 continue;
             }
 
@@ -459,23 +477,48 @@ impl BatchAuction {
             match Self::execute_op(&env, &order, &auction_addr, order.deadline) {
                 Ok(amount_out) => {
                     // Forward output tokens to the original trader.
-                    SepTokenClient::new(&env, &order.token_out).transfer(
-                        &auction_addr,
-                        &order.trader,
-                        &amount_out,
-                    );
-                    results.push_back(amount_out);
+                    let payout_ok = SepTokenClient::new(&env, &order.token_out)
+                        .try_transfer(&auction_addr, &order.trader, &amount_out)
+                        .ok()
+                        .and_then(|r| r.ok());
+                    if payout_ok.is_none() {
+                        // Swap succeeded but payout to the trader failed (no
+                        // trustline, frozen/revoked auth, clawback, etc.).
+                        // Tokens are stranded in the auction contract — the
+                        // order is still dropped so the batch can continue.
+                        env.events().publish(
+                            (Symbol::new(&env, "order_failed"), order.trader.clone()),
+                            (order_id,),
+                        );
+                    } else {
+                        results.push_back(amount_out);
+                        env.events().publish(
+                            (Symbol::new(&env, "order_settled"), order.trader.clone()),
+                            (order_id, amount_out),
+                        );
+                    }
                 }
                 Err(()) => {
                     // Unfillable order: the failed swap attempt was rolled back
                     // by the runtime, so the full escrow is still held by the
                     // auction contract. Refund it and drop the order instead of
                     // letting it block every other trader's settlement.
-                    SepTokenClient::new(&env, &order.token_in).transfer(
-                        &auction_addr,
-                        &order.trader,
-                        &order.amount_in,
-                    );
+                    let refund_ok = SepTokenClient::new(&env, &order.token_in)
+                        .try_transfer(&auction_addr, &order.trader, &order.amount_in)
+                        .ok()
+                        .and_then(|r| r.ok());
+                    if refund_ok.is_none() {
+                        // Refund transfer itself failed — escrow is stranded
+                        // but the order is still dropped so other traders are
+                        // not blocked.
+                        env.events().publish(
+                            (
+                                Symbol::new(&env, "order_refund_failed"),
+                                order.trader.clone(),
+                            ),
+                            (order_id,),
+                        );
+                    }
                     env.events().publish(
                         (Symbol::new(&env, "order_failed"), order.trader.clone()),
                         (order_id,),
@@ -529,6 +572,10 @@ impl BatchAuction {
     /// error (slippage/`min_out` not met, paused, insufficient liquidity) is
     /// returned as `Err(())` instead of escalating to a host panic, so the
     /// caller can isolate the failure to this one order.
+    ///
+    /// The unspent-refund transfer is also wrapped with `try_transfer`
+    /// (issue #546) so a trustline/auth failure on the refund leg cannot
+    /// revert the caller.
     fn execute_op(env: &Env, order: &Order, sender: &Address, deadline: u64) -> Result<i128, ()> {
         let (_, venue, venue_type) = Self::best_venue(env, order);
 
@@ -566,7 +613,10 @@ impl BatchAuction {
         let spent = spent_before - spent_after;
         let unspent = order.amount_in - spent;
         if unspent > 0 {
-            SepTokenClient::new(env, &order.token_in).transfer(sender, &order.trader, &unspent);
+            SepTokenClient::new(env, &order.token_in)
+                .try_transfer(sender, &order.trader, &unspent)
+                .ok()
+                .and_then(|r| r.ok());
         }
 
         Ok(amount_out)
@@ -587,13 +637,38 @@ impl BatchAuction {
                 PoolType::Amm => PoolType::Cl,
                 PoolType::Cl => PoolType::Amm,
             };
-            if let Some(alt_q) = Self::try_quote(env, &alt, alt_type, order) {
-                if alt_q > primary_q {
-                    return (alt_q, alt, alt_type);
+            // Re-check the alternate venue's token pair at routing time so a
+            // malformed order written before validation was added can never be
+            // routed into the wrong output asset.
+            if Self::pool_matches_pair(env, &alt, alt_type, &order.token_in, &order.token_out) {
+                if let Some(alt_q) = Self::try_quote(env, &alt, alt_type, order) {
+                    if alt_q > primary_q {
+                        return (alt_q, alt, alt_type);
+                    }
                 }
             }
         }
         (primary_q, order.pool.clone(), order.pool_type)
+    }
+
+    /// Return whether `pool` trades exactly the unordered `(token_in, token_out)`
+    /// pair for the requested venue type.
+    fn pool_matches_pair(
+        env: &Env,
+        pool: &Address,
+        pool_type: PoolType,
+        token_in: &Address,
+        token_out: &Address,
+    ) -> bool {
+        let (pool_token_a, pool_token_b) = match pool_type {
+            PoolType::Amm => {
+                let info = AmmPoolClient::new(env, pool).get_info();
+                (info.token_a, info.token_b)
+            }
+            PoolType::Cl => ConcentratedLiquidityClient::new(env, pool).get_tokens(),
+        };
+        (token_in == &pool_token_a && token_out == &pool_token_b)
+            || (token_in == &pool_token_b && token_out == &pool_token_a)
     }
 
     /// Read-only output quote for `order` on `pool` interpreted as `pool_type`.
@@ -1292,6 +1367,107 @@ mod tests {
     }
 
     #[test]
+    fn test_submit_order_cl_rejects_alt_pool_with_wrong_pair() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let admin = Address::generate(&env);
+        let ta = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tb = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tc = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let cl_pool = deploy_cl_pool(&env, &admin, &ta, &tb);
+        let wrong_amm_pool = deploy_pool(&env, &ta, &tc);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+
+        let result = client.try_submit_order_cl(
+            &trader,
+            &cl_pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &true,
+            &0_u128,
+            &Some(wrong_amm_pool),
+            &u64::MAX,
+        );
+        assert_eq!(result, Err(Ok(AuctionError::InvalidPoolTokenPair)));
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&trader),
+            100_000_i128
+        );
+        assert_eq!(client.get_pending_orders().len(), 0);
+    }
+
+    #[test]
+    fn test_quote_order_ignores_stored_alt_pool_with_wrong_pair() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let admin = Address::generate(&env);
+        let ta = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tb = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let tc = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        let primary_pool = deploy_cl_pool(&env, &admin, &ta, &tb);
+        let wrong_alt_pool = deploy_pool(&env, &ta, &tc);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        let order = Order {
+            id: 7,
+            trader,
+            pool: primary_pool.clone(),
+            token_in: ta.clone(),
+            token_out: tb.clone(),
+            amount_in: 10_000_i128,
+            min_out: 0_i128,
+            submitted_at: 1000,
+            deadline: u64::MAX,
+            pool_type: PoolType::Cl,
+            zero_for_one: true,
+            sqrt_price_limit: 0_u128,
+            alt_pool: Some(wrong_alt_pool),
+        };
+        env.as_contract(&auction_addr, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::Order(order.id), &order);
+        });
+
+        let (best_out, best_pool, best_type) = client.quote_order(&order.id);
+        let primary_q = ConcentratedLiquidityClient::new(&env, &primary_pool)
+            .estimate_price_impact(&true, &10_000_i128, &0_u128)
+            .amount_out;
+        assert_eq!(best_out, primary_q);
+        assert_eq!(best_pool, primary_pool);
+        assert_eq!(best_type, PoolType::Cl);
+    }
+
+    #[test]
     fn test_amm_order_still_defaults_to_amm_pool_type() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
@@ -1365,5 +1541,161 @@ mod tests {
         // Attempting settle_batch at t=1035 must fail because opened_at is 1030 and window is 30s
         let err = client.try_settle_batch().err().unwrap().unwrap();
         assert_eq!(err, AuctionError::BatchWindowOpen);
+    }
+
+    // ── Issue #546: transfer failure isolation ──────────────────────────────────
+
+    /// Verify that a swap failure followed by a *successful* refund still
+    /// isolates the order (issue #473) and that `try_transfer` wrapping on
+    /// the refund leg (issue #546) is exercised. The order is dropped and
+    /// the batch continues.
+    #[test]
+    fn test_swap_failure_refund_via_try_transfer() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, pool, admin) = setup(&env);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let bad_trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&bad_trader, &10_000_i128);
+
+        client.submit_order(
+            &bad_trader,
+            &pool,
+            &ta,
+            &tb,
+            &5_000_i128,
+            &1_000_000_000_i128, // impossible min_out
+            &u64::MAX,
+        );
+
+        env.ledger().set_timestamp(1031);
+
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 0);
+
+        // Refund went through (try_transfer succeeded here).
+        assert_eq!(
+            StellarTokenClient::new(&env, &ta).balance(&bad_trader),
+            10_000_i128
+        );
+        assert_eq!(client.get_pending_orders().len(), 0);
+    }
+
+    /// Issue #546: payout transfer failure isolation.
+    ///
+    /// Submit two orders. Before settlement, modify the first order's
+    /// `token_out` in storage to point at a non-existent contract. The swap
+    /// succeeds (AMM swap doesn't reference `token_out` directly) but the
+    /// payout `try_transfer` traps on the fake address. The failing order is
+    /// dropped and the second order still settles — proving a single bad
+    /// payout cannot revert the entire batch.
+    #[test]
+    fn test_failed_payout_does_not_revert_batch() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, pool, admin) = setup(&env);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+        client.set_max_orders(&admin, &2_u32);
+
+        let bad_trader = Address::generate(&env);
+        let good_trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&bad_trader, &100_000_i128);
+        StellarAssetClient::new(&env, &ta).mint(&good_trader, &100_000_i128);
+
+        // Both orders submit with valid tokens — escrow succeeds.
+        client.submit_order(
+            &bad_trader,
+            &pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &u64::MAX,
+        );
+        client.submit_order(
+            &good_trader,
+            &pool,
+            &ta,
+            &tb,
+            &10_000_i128,
+            &0_i128,
+            &u64::MAX,
+        );
+
+        // Mutate the bad order's token_out to a non-existent contract
+        // address so that the payout try_transfer will trap.
+        let fake_token_out = Address::generate(&env);
+        env.as_contract(&auction_addr, || {
+            let mut bad_order: Order = env.storage().instance().get(&DataKey::Order(0)).unwrap();
+            bad_order.token_out = fake_token_out;
+            env.storage().instance().set(&DataKey::Order(0), &bad_order);
+        });
+
+        env.ledger().set_timestamp(1031);
+
+        // Batch must NOT revert — the good order settles despite the bad
+        // order's payout transfer failure.
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 1);
+        assert!(results.get(0).unwrap() > 0);
+        assert!(StellarTokenClient::new(&env, &tb).balance(&good_trader) > 0);
+
+        // Both orders are cleared from the batch.
+        assert_eq!(client.get_pending_orders().len(), 0);
+    }
+
+    /// Issue #546: deadline-expiry refund transfer failure isolation.
+    ///
+    /// Submit an order with a short deadline that has already passed and
+    /// mutate its `token_in` to a non-existent contract address before
+    /// settlement. The order hits the deadline-expired path and the refund
+    /// `try_transfer` traps on the fake address. The batch must complete
+    /// without reverting.
+    #[test]
+    fn test_failed_deadline_refund_does_not_revert_batch() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+
+        let (ta, tb, pool, admin) = setup(&env);
+
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let trader = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
+
+        // Submit an order with a short deadline (1010) that will expire.
+        client.submit_order(&trader, &pool, &ta, &tb, &10_000_i128, &0_i128, &1010_u64);
+
+        // Mutate token_in to a non-existent contract so the deadline-expiry
+        // refund try_transfer traps.
+        let fake_token_in = Address::generate(&env);
+        env.as_contract(&auction_addr, || {
+            let mut order: Order = env.storage().instance().get(&DataKey::Order(0)).unwrap();
+            order.token_in = fake_token_in;
+            env.storage().instance().set(&DataKey::Order(0), &order);
+        });
+
+        // Advance past the batch window AND the deadline.
+        env.ledger().set_timestamp(1040);
+
+        // Batch must NOT revert — the expired order is dropped despite the
+        // refund transfer failure.
+        let results = client.settle_batch();
+        assert_eq!(results.len(), 0);
+        assert_eq!(client.get_pending_orders().len(), 0);
     }
 }

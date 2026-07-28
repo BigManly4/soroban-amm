@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- **factory: `set_treasury`/`set_global_fee`/`set_global_fee_paginated` panic when any CL pool exists**
+  - `sync_global_fee_page` iterated `PoolByIndex` and unconditionally called `AmmPoolClient::set_protocol_fee()` on every non-governed entry. CL pools lack `GovernanceFor` and don't implement `set_protocol_fee`, so the call would trap and revert the entire admin transaction as soon as a page containing a CL pool address was reached.
+  - Added a `PoolTokens` presence guard (mirroring the existing guard in `sweep_fees_page`): entries without a `PoolTokens` key are not AMM pools and are skipped. This blocks the invalid cross-interface call both for CL pools that may have been written to `PoolByIndex` before the separate-index fix and for any future non-AMM pool types.
 - **incentive_campaigns: retroactive reward gaming via flash-deposit or rate change (#425)**
   - The old `claim_rewards` formula (`reward_rate × elapsed × lp_balance / total_supply`)
     applied the provider's *current* LP balance to the *entire* elapsed window since campaign

@@ -6,8 +6,11 @@ use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, vec, Address, Env, Vec,
 };
 
-use amm::{AmmPoolClient, PoolInfo};
+use amm::AmmPoolClient;
 use factory::FactoryClient;
+
+const MIN_TTL: u32 = 172_800;
+const BUMP_TO: u32 = 518_400;
 
 #[contractclient(name = "ClPoolClient")]
 pub trait ClPoolInterface {
@@ -93,6 +96,9 @@ pub enum DataKey {
     Factory,
     MaxHops,
     ClPools,
+    RoutingTokens,
+    ClPoolCount,
+    ClPool(u32),
 }
 
 #[contract]
@@ -103,6 +109,7 @@ impl DexAggregator {
     pub const DEFAULT_MAX_HOPS: u32 = 4;
     pub const PRICE_TOLERANCE_BPS: i128 = 10;
     pub const BPS: i128 = 10_000;
+    pub const MAX_CL_POOLS: u32 = 50;
     pub const CL_FEE_TIERS: [i128; 3] = [30, 100, 500];
 
     pub const MIN_SQRT_PRICE: u128 = 4_295_128_739_u128;
@@ -120,7 +127,14 @@ impl DexAggregator {
             .set(&DataKey::MaxHops, &Self::DEFAULT_MAX_HOPS);
         env.storage()
             .instance()
-            .set(&DataKey::ClPools, &Vec::<ClPoolInfo>::new(&env));
+            .set(&DataKey::ClPoolCount, &0u32);
+    }
+
+    pub fn set_max_hops(env: Env, max_hops: u32) {
+        Self::extend_ttl(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxHops, &max_hops);
     }
 
     pub fn register_cl_pool(
@@ -134,25 +148,45 @@ impl DexAggregator {
         admin.require_auth();
 
         let mut cl_pools: Vec<ClPoolInfo> = env
+        Self::extend_ttl(&env);
+        let count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ClPools)
-            .unwrap_or_else(|| Vec::new(&env));
+            .get(&DataKey::ClPoolCount)
+            .unwrap_or(0);
 
-        for i in 0..cl_pools.len() {
-            let entry = cl_pools.get(i).unwrap();
+        for i in 0..count {
+            let entry: ClPoolInfo = env
+                .storage()
+                .instance()
+                .get(&DataKey::ClPool(i))
+                .unwrap();
             if entry.pool == pool {
                 return;
             }
         }
 
-        cl_pools.push_back(ClPoolInfo {
-            pool: pool.clone(),
-            token_a: token_a.clone(),
-            token_b: token_b.clone(),
-            fee_bps,
-        });
-        env.storage().instance().set(&DataKey::ClPools, &cl_pools);
+        assert!(
+            count < Self::MAX_CL_POOLS,
+            "max CL pools reached"
+        );
+
+        env.storage().instance().set(
+            &DataKey::ClPool(count),
+            &ClPoolInfo {
+                pool: pool.clone(),
+                token_a: token_a.clone(),
+                token_b: token_b.clone(),
+                fee_bps,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::ClPoolCount, &(count + 1));
+    }
+
+    pub fn set_routing_tokens(env: Env, tokens: Vec<Address>) {
+        env.storage().instance().set(&DataKey::RoutingTokens, &tokens);
     }
 
     pub fn remove_cl_pool(env: Env, pool: Address) {
@@ -183,9 +217,15 @@ impl DexAggregator {
         amount_in: i128,
         max_hops: u32,
     ) -> Result<RouteQuote, AggregatorError> {
+        Self::extend_ttl(&env);
         assert!(token_in != token_out, "same token");
         assert!(amount_in > 0, "amount must be positive");
-        let cap = max_hops.min(Self::DEFAULT_MAX_HOPS);
+        let stored_max_hops: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxHops)
+            .unwrap_or(Self::DEFAULT_MAX_HOPS);
+        let cap = max_hops.min(stored_max_hops);
         if cap == 0 {
             return Err(AggregatorError::NoRouteFound);
         }
@@ -212,6 +252,7 @@ impl DexAggregator {
         min_out: i128,
         deadline: u64,
     ) -> Result<i128, AggregatorError> {
+        Self::extend_ttl(&env);
         trader.require_auth();
         if route.hops.is_empty() || route.amount_out < min_out {
             return Err(AggregatorError::SlippageExceeded);
@@ -230,6 +271,7 @@ impl DexAggregator {
         amount_in: i128,
         min_out: i128,
     ) -> Result<i128, AggregatorError> {
+        Self::extend_ttl(&env);
         let max_hops: u32 = env
             .storage()
             .instance()
@@ -247,6 +289,7 @@ impl DexAggregator {
         amount_in: i128,
         quoted_out: i128,
     ) -> bool {
+        Self::extend_ttl(&env);
         let max_hops: u32 = env
             .storage()
             .instance()
@@ -275,7 +318,7 @@ impl DexAggregator {
     ) -> Result<RouteQuote, AggregatorError> {
         let factory: Address = env.storage().instance().get(&DataKey::Factory).unwrap();
         let factory_client = FactoryClient::new(env, &factory);
-        let tokens = Self::discover_tokens(env, &factory_client);
+        let tokens = Self::discover_tokens(env, token_in, token_out);
 
         let mut best_out: i128 = 0;
         let mut best_hops: Vec<RouteHop> = Vec::new(env);
@@ -289,13 +332,13 @@ impl DexAggregator {
         // node re-expands to O(N) neighbours regardless of whether they have
         // already been explored, blowing the frontier up to O(N^max_hops) and
         // exhausting the per-transaction instruction budget (#363).
-        let mut visited: Vec<(Address, u32)> = Vec::new(env);
+        let mut visited: Vec<(Address, u32, i128)> = Vec::new(env);
 
         frontier_token.push_back(token_in.clone());
         frontier_amount.push_back(amount_in);
         frontier_hops.push_back(Vec::new(env));
         frontier_depth.push_back(0);
-        visited.push_back((token_in.clone(), 0));
+        visited.push_back((token_in.clone(), 0, amount_in));
 
         let mut idx: u32 = 0;
         while idx < frontier_token.len() {
@@ -337,9 +380,8 @@ impl DexAggregator {
                         best_hops = new_hops;
                     }
                 } else if depth + 1 < max_hops
-                    && !Self::is_visited(&visited, &next_token, depth + 1)
+                    && !Self::is_visited_and_worse(&mut visited, &next_token, depth + 1, step.amount_out)
                 {
-                    visited.push_back((next_token.clone(), depth + 1));
                     frontier_token.push_back(next_token);
                     frontier_amount.push_back(step.amount_out);
                     frontier_hops.push_back(new_hops);
@@ -432,9 +474,9 @@ impl DexAggregator {
             }
         }
 
-        let cl_pools = Self::registered_cl_pools(env);
-        for i in 0..cl_pools.len() {
-            let info = cl_pools.get(i).unwrap();
+        let cl_count: u32 = env.storage().instance().get(&DataKey::ClPoolCount).unwrap_or(0);
+        for i in 0..cl_count {
+            let info: ClPoolInfo = env.storage().instance().get(&DataKey::ClPool(i)).unwrap();
             if !(Self::is_cl_pool_match(&info, token_in, token_out)) {
                 continue;
             }
@@ -511,30 +553,22 @@ impl DexAggregator {
         }
     }
 
-    fn discover_tokens(env: &Env, factory: &FactoryClient) -> Vec<Address> {
-        let pools = factory.all_pools();
-        let mut tokens: Vec<Address> = Vec::new(env);
-        for i in 0..pools.len() {
-            let pool = pools.get(i).unwrap();
-            let info: PoolInfo = AmmPoolClient::new(env, &pool).get_info();
-            Self::push_unique(&mut tokens, info.token_a);
-            Self::push_unique(&mut tokens, info.token_b);
-        }
+    fn discover_tokens(env: &Env, token_in: &Address, token_out: &Address) -> Vec<Address> {
+        let mut tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoutingTokens)
+            .unwrap_or_else(|| Vec::new(env));
+        Self::push_unique(&mut tokens, token_in.clone());
+        Self::push_unique(&mut tokens, token_out.clone());
 
-        let cl_pools = Self::registered_cl_pools(env);
-        for i in 0..cl_pools.len() {
-            let info = cl_pools.get(i).unwrap();
+        let cl_count: u32 = env.storage().instance().get(&DataKey::ClPoolCount).unwrap_or(0);
+        for i in 0..cl_count {
+            let info: ClPoolInfo = env.storage().instance().get(&DataKey::ClPool(i)).unwrap();
             Self::push_unique(&mut tokens, info.token_a.clone());
             Self::push_unique(&mut tokens, info.token_b.clone());
         }
         tokens
-    }
-
-    fn registered_cl_pools(env: &Env) -> Vec<ClPoolInfo> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ClPools)
-            .unwrap_or_else(|| Vec::new(env))
     }
 
     fn is_cl_pool_match(info: &ClPoolInfo, token_in: &Address, token_out: &Address) -> bool {
@@ -542,14 +576,25 @@ impl DexAggregator {
             || (info.token_a == *token_out && info.token_b == *token_in)
     }
 
-    /// Has `(token, depth)` already been enqueued onto the BFS frontier? (#363)
-    fn is_visited(visited: &Vec<(Address, u32)>, token: &Address, depth: u32) -> bool {
+    /// Has `(token, depth)` already been enqueued with a better or equal amount? (#363)
+    fn is_visited_and_worse(
+        visited: &mut Vec<(Address, u32, i128)>,
+        token: &Address,
+        depth: u32,
+        amount: i128,
+    ) -> bool {
         for i in 0..visited.len() {
-            let (t, d) = visited.get(i).unwrap();
+            let (t, d, a) = visited.get(i).unwrap();
             if d == depth && t == *token {
-                return true;
+                if amount <= a {
+                    return true;
+                } else {
+                    visited.set(i, (t, d, amount));
+                    return false;
+                }
             }
         }
+        visited.push_back((token.clone(), depth, amount));
         false
     }
 
@@ -560,6 +605,10 @@ impl DexAggregator {
             }
         }
         vec.push_back(addr);
+    }
+
+    fn extend_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(MIN_TTL, BUMP_TO);
     }
 }
 
@@ -586,15 +635,23 @@ mod tests {
         let token_a = Address::generate(&env);
         let token_b = Address::generate(&env);
 
-        let mut visited: Vec<(Address, u32)> = Vec::new(&env);
-        visited.push_back((token_a.clone(), 1));
+        let mut visited: Vec<(Address, u32, i128)> = Vec::new(&env);
+        visited.push_back((token_a.clone(), 1, 100));
 
-        // Same (token, depth) pair is treated as already explored.
-        assert!(DexAggregator::is_visited(&visited, &token_a, 1));
+        // Same (token, depth) pair with worse or equal amount is blocked.
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 100));
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 50));
+        // Same (token, depth) pair with strictly better amount is allowed.
+        assert!(!DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 150));
+        
+        // After being allowed, the new best amount is recorded (150).
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 150));
+        assert!(DexAggregator::is_visited_and_worse(&mut visited, &token_a, 1, 140));
+
         // Same token at a different depth must still be explorable.
-        assert!(!DexAggregator::is_visited(&visited, &token_a, 2));
+        assert!(!DexAggregator::is_visited_and_worse(&mut visited, &token_a, 2, 50));
         // A different token at the same depth is independent.
-        assert!(!DexAggregator::is_visited(&visited, &token_b, 1));
+        assert!(!DexAggregator::is_visited_and_worse(&mut visited, &token_b, 1, 50));
     }
 
     #[test]
@@ -621,7 +678,7 @@ mod tests {
         env.mock_all_auths();
         agg.register_cl_pool(&cl_pool, &token_a, &token_b, &30_i128);
 
-        let tokens = DexAggregator::discover_tokens(&env, &factory);
+        let tokens = DexAggregator::discover_tokens(&env, &token_a, &token_b);
         assert_eq!(tokens.len(), 2);
 
         let mut found_a = false;
