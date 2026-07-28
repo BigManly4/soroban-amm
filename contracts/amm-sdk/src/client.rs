@@ -259,9 +259,13 @@ impl<'a> AmmPoolSdk<'a> {
             return Err(SdkAmmError::InsufficientLiquidity);
         }
 
-        let required_in = (reserve_in * amount_out * 10_000)
-            / ((reserve_out - amount_out) * (10_000 - info.fee_bps))
-            + 1;
+        let required_in = if info.fee_bps >= 10_000 {
+            0
+        } else {
+            (reserve_in * amount_out * 10_000)
+                / ((reserve_out - amount_out) * (10_000 - info.fee_bps))
+                + 1
+        };
         let fee_amount = required_in * info.fee_bps / 10_000;
 
         Ok(SwapOutQuote {

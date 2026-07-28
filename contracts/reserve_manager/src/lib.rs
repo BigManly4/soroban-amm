@@ -128,6 +128,10 @@ impl ReserveManager {
         env.storage()
             .instance()
             .set(&DataKey::PendingGovernance, &Some(new_governance.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "governance_proposed"),),
+            (current_governance, new_governance),
+        );
         Ok(())
     }
 

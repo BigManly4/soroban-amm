@@ -276,6 +276,63 @@ impl PolVestingContract {
             .ok_or(VestingError::VestingNotFound)
     }
 
+    /// Governance can reassign a vesting schedule to a new beneficiary.
+    ///
+    /// The schedule is transferred intact, preserving the total, released,
+    /// and vesting timeline. A new schedule ID is generated for the new beneficiary.
+    pub fn change_beneficiary(
+        env: Env,
+        governance: Address,
+        old_beneficiary: Address,
+        old_schedule_id: u32,
+        new_beneficiary: Address,
+    ) -> Result<u32, VestingError> {
+        governance.require_auth();
+        Self::require_governance(&env, &governance)?;
+
+        let old_key = DataKey::Vesting(old_beneficiary.clone(), old_schedule_id);
+        let mut schedule: PolVesting = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .ok_or(VestingError::VestingNotFound)?;
+
+        env.storage().persistent().remove(&old_key);
+
+        let next_id_key = DataKey::NextScheduleId(new_beneficiary.clone());
+        let new_schedule_id: u32 = env.storage().persistent().get(&next_id_key).unwrap_or(0);
+        let new_key = DataKey::Vesting(new_beneficiary.clone(), new_schedule_id);
+
+        if env.storage().persistent().has(&new_key) {
+            return Err(VestingError::VestingAlreadyExists);
+        }
+
+        schedule.schedule_id = new_schedule_id;
+        schedule.beneficiary = new_beneficiary.clone();
+
+        env.storage().persistent().set(&new_key, &schedule);
+        env.storage()
+            .persistent()
+            .extend_ttl(&new_key, MIN_TTL, BUMP_TO);
+        env.storage()
+            .persistent()
+            .set(&next_id_key, &(new_schedule_id + 1));
+        env.storage()
+            .persistent()
+            .extend_ttl(&next_id_key, MIN_TTL, BUMP_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "beneficiary_changed"),),
+            (
+                old_beneficiary,
+                old_schedule_id,
+                new_beneficiary.clone(),
+                new_schedule_id,
+            ),
+        );
+        Ok(new_schedule_id)
+    }
+
     /// Governance cancels a vesting schedule. Any unreleased tokens are
     /// returned to the treasury; already-released tokens are unaffected.
     pub fn revoke_vesting(
@@ -630,5 +687,36 @@ mod tests {
         assert_eq!(old_governance_err, VestingError::NotGovernance);
 
         client.revoke_vesting(&new_governance, &s.beneficiary, &schedule_id);
+    }
+
+    #[test]
+    fn test_change_beneficiary() {
+        let s = setup();
+        let schedule_id = create_schedule(&s, 0, 100, 1000);
+
+        let client = PolVestingContractClient::new(&s.env, &s.contract_id);
+        let new_beneficiary = Address::generate(&s.env);
+
+        let new_schedule_id = client.change_beneficiary(
+            &s.governance,
+            &s.beneficiary,
+            &schedule_id,
+            &new_beneficiary,
+        );
+
+        // Old schedule should be gone
+        let err = client
+            .try_get_vesting(&s.beneficiary, &schedule_id)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, VestingError::VestingNotFound);
+
+        // New schedule should exist and have same timeline
+        let schedule = client.get_vesting(&new_beneficiary, &new_schedule_id);
+        assert_eq!(schedule.beneficiary, new_beneficiary);
+        assert_eq!(schedule.total, 1_000_000);
+        assert_eq!(schedule.cliff_ledger, 100);
+        assert_eq!(schedule.end_ledger, 1000);
+        assert_eq!(schedule.released, 0);
     }
 }

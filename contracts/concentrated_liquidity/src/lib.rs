@@ -232,7 +232,7 @@ impl ConcentratedLiquidity {
         if token_a == token_b {
             return Err(ClError::TokensMustDiffer);
         }
-        if !(0..=10_000).contains(&fee_bps) {
+        if !(0..10_000).contains(&fee_bps) {
             return Err(ClError::InvalidFeeBps);
         }
         if !(MIN_TICK..=MAX_TICK).contains(&initial_tick) {
@@ -574,6 +574,9 @@ impl ConcentratedLiquidity {
         if amount_a_desired <= 0 && amount_b_desired <= 0 {
             return Err(ClError::ZeroAmounts);
         }
+        if amount_a_desired < 0 || amount_b_desired < 0 {
+            return Err(ClError::ZeroAmounts);
+        }
         let current_tick: i32 = env.storage().instance().get(&DataKey::CurrentTick).unwrap();
         let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
         let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
@@ -584,6 +587,9 @@ impl ConcentratedLiquidity {
             amount_a_desired,
             amount_b_desired,
         );
+        if amount_a < 0 || amount_b < 0 {
+            return Err(ClError::ZeroAmounts);
+        }
         if amount_a < min_a || amount_b < min_b {
             return Err(ClError::SlippageExceeded);
         }
@@ -1917,8 +1923,9 @@ impl ConcentratedLiquidity {
         while amount_remaining > 0 {
             let next_tick_opt = Self::next_initialized_tick(&env, current_tick, zero_for_one);
             // No initialized ticks in this direction and no liquidity — nothing to trade.
+            // amount_remaining is left untouched so this untraded portion is excluded
+            // from amount_in_actual below.
             if next_tick_opt.is_none() && active_liquidity == 0 {
-                amount_remaining = 0;
                 break;
             }
 
@@ -2062,7 +2069,7 @@ impl ConcentratedLiquidity {
 
                 if zero_for_one {
                     active_liquidity -= tick_info.liquidity_net;
-                    current_tick = next_tick - 1;
+                    current_tick = (next_tick - 1).max(MIN_TICK);
                 } else {
                     active_liquidity += tick_info.liquidity_net;
                     current_tick = next_tick;
@@ -2159,7 +2166,8 @@ impl ConcentratedLiquidity {
                 } else {
                     sqrt_price_x96 = target_price_x96;
                     current_tick = Self::price_to_tick(sqrt_price_x96);
-                    amount_remaining = 0;
+                    // No liquidity in this gap — amount_remaining is left untouched
+                    // so this untraded portion is excluded from amount_in_actual.
                 }
                 break;
             }
@@ -2441,27 +2449,14 @@ impl ConcentratedLiquidity {
         (inside_a, inside_b)
     }
 
+    /// Computes `PRICE_SCALE * 1.0001^tick` via binary exponentiation (O(log|tick|)
+    /// multiplications), supporting the full [MIN_TICK, MAX_TICK] range. Delegates
+    /// to `tick_to_price_bexp`, which uses saturating arithmetic to prevent panics
+    /// at extreme ticks.
     pub fn tick_to_price(tick: i32) -> i128 {
-        if tick == 0 {
-            return 1_000_000;
-        }
-        let abs_tick = tick.unsigned_abs() as i128;
-        let iters = abs_tick.min(300);
-        let mut price = 1_000_000_i128;
-        for _ in 0..iters {
-            price = price * 1_000_100 / 1_000_000;
-        }
-        if tick < 0 {
-            price = 1_000_000 * 1_000_000 / price;
-        }
-        price
+        Self::tick_to_price_bexp(tick)
     }
 
-    /// Binary-exponentiation variant of `tick_to_price`.
-    ///
-    /// Computes `PRICE_SCALE * 1.0001^tick` in O(log|tick|) multiplications,
-    /// supporting the full tick range without the 300-iteration cap.
-    /// Uses saturating arithmetic to prevent panics at extreme ticks.
     fn tick_to_price_bexp(tick: i32) -> i128 {
         if tick == 0 {
             return PRICE_SCALE;
@@ -2796,8 +2791,10 @@ impl ConcentratedLiquidity {
 
         while amount_remaining > 0 {
             let next_tick_opt = Self::next_initialized_tick(env, current_tick, zero_for_one);
+            // No initialized ticks in this direction and no liquidity — nothing to trade.
+            // amount_remaining is left untouched so this untraded portion is excluded
+            // from amount_in_actual below.
             if next_tick_opt.is_none() && active_liquidity == 0 {
-                amount_remaining = 0;
                 break;
             }
 
@@ -2874,7 +2871,7 @@ impl ConcentratedLiquidity {
                 let tick_info = Self::get_tick(env, next_tick);
                 if zero_for_one {
                     active_liquidity -= tick_info.liquidity_net;
-                    current_tick = next_tick - 1;
+                    current_tick = (next_tick - 1).max(MIN_TICK);
                 } else {
                     active_liquidity += tick_info.liquidity_net;
                     current_tick = next_tick;
@@ -2918,7 +2915,8 @@ impl ConcentratedLiquidity {
                 } else {
                     sqrt_price_x96 = target_price_x96;
                     current_tick = Self::price_to_tick(sqrt_price_x96);
-                    amount_remaining = 0;
+                    // No liquidity in this gap — amount_remaining is left untouched
+                    // so this untraded portion is excluded from amount_in_actual.
                 }
                 break;
             }
@@ -2991,8 +2989,8 @@ impl ConcentratedLiquidity {
     fn price_to_tick(sqrt_p: u128) -> i32 {
         let sqrt_p_scaled = ((sqrt_p * 1000) >> 96) as i128;
         let target_price = sqrt_p_scaled * sqrt_p_scaled;
-        let mut low = -300_i32;
-        let mut high = 300_i32;
+        let mut low = MIN_TICK;
+        let mut high = MAX_TICK;
         let mut best_tick = 0_i32;
         let mut min_diff = i128::MAX;
 

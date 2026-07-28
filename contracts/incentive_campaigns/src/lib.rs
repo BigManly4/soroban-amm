@@ -45,6 +45,7 @@ use soroban_sdk::{
 pub trait LpTokenInterface {
     fn balance(env: Env, id: Address) -> i128;
     fn total_supply(env: Env) -> i128;
+    fn admin(env: Env) -> Address;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,9 +58,16 @@ pub enum DataKey {
     NextCampaignId,
     Campaign(u64),
     CampaignIdByIndex(u64),
-    /// Per (campaign_id, provider): accumulator snapshot at last claim.
-    /// Replaces the old `ProviderDebt` key that stored a raw claimed amount.
+    /// Per (campaign_id, provider): cumulative reward amount already accounted
+    /// for by this provider's prior claims.
+    ProviderDebt(u64, Address),
+    /// Per (campaign_id, provider): snapshot of accumulator at last claim.
     ProviderSnapshot(u64, Address),
+    /// Per campaign: total pool rewards accrued up to `CampaignLastAccrualTime`.
+    CampaignAccruedRewards(u64),
+    /// Per campaign: last timestamp up to which `CampaignAccruedRewards` was
+    /// checkpointed. Initialized logically to `campaign.start_time`.
+    CampaignLastAccrualTime(u64),
     /// Audit: next distribution record id
     NextDistributionId,
     DistributionRecord(u64),
@@ -209,6 +217,15 @@ impl IncentiveCampaigns {
         assert!(end_time > start_time, "invalid campaign window");
         assert!(reward_rate > 0, "reward_rate must be positive");
         assert!(funding_amount > 0, "funding required");
+        let duration = (end_time - start_time) as i128;
+        let max_payout = reward_rate * duration;
+        assert!(
+            funding_amount >= max_payout,
+            "funding must cover reward_rate * duration"
+        );
+
+        let lp_admin = LpTokenClient::new(&env, &lp_token).admin();
+        assert!(lp_admin == pool, "lp_token does not match pool");
 
         let id: u64 = env
             .storage()
@@ -236,6 +253,14 @@ impl IncentiveCampaigns {
         let campaign_key = DataKey::Campaign(id);
         env.storage().persistent().set(&campaign_key, &campaign);
         extend_persistent_ttl(&env, &campaign_key);
+        let accrued_key = DataKey::CampaignAccruedRewards(id);
+        env.storage().persistent().set(&accrued_key, &0_i128);
+        extend_persistent_ttl(&env, &accrued_key);
+        let last_accrual_key = DataKey::CampaignLastAccrualTime(id);
+        env.storage()
+            .persistent()
+            .set(&last_accrual_key, &start_time);
+        extend_persistent_ttl(&env, &last_accrual_key);
 
         env.storage()
             .instance()
@@ -275,19 +300,7 @@ impl IncentiveCampaigns {
             .get(&campaign_key)
             .expect("campaign not found");
         extend_persistent_ttl(&env, &campaign_key);
-
-        let now = env.ledger().timestamp();
-        // Cap the flush at end_time so we don't advance past the campaign window.
-        let flush_time = if now > campaign.end_time {
-            campaign.end_time
-        } else {
-            now
-        };
-
-        // Read current total supply to advance the accumulator correctly.
-        let total_supply = LpTokenClient::new(&env, &campaign.lp_token).total_supply();
-        campaign = advance_accumulator(campaign, flush_time, total_supply);
-
+        Self::checkpoint_campaign_rewards(&env, campaign_id, &campaign, env.ledger().timestamp());
         campaign.reward_rate = new_rate;
         env.storage().persistent().set(&campaign_key, &campaign);
 
@@ -325,6 +338,7 @@ impl IncentiveCampaigns {
 
         let now = env.ledger().timestamp();
         assert!(now > campaign.end_time, "campaign not yet ended");
+        Self::checkpoint_campaign_rewards(&env, campaign_id, &campaign, now);
 
         let leftover = campaign.funding_amount - campaign.total_distributed;
         assert!(leftover > 0, "no leftover funds to recover");
@@ -379,7 +393,7 @@ impl IncentiveCampaigns {
 
         // Cap accrual at end_time so LPs can still claim earned rewards after the
         // campaign window closes without accruing phantom future rewards.
-        let accrual_time = now.min(campaign.end_time);
+        let claim_time = now.min(campaign.end_time);
 
         let lp_balance = LpTokenClient::new(&env, &campaign.lp_token).balance(&provider);
         assert!(lp_balance > 0, "no LP balance");
@@ -387,24 +401,11 @@ impl IncentiveCampaigns {
         let total_supply = LpTokenClient::new(&env, &campaign.lp_token).total_supply();
         assert!(total_supply > 0, "no LP supply");
 
-        // ── Step 1: advance the global accumulator to accrual_time ───────────────
-        campaign = advance_accumulator(campaign, accrual_time, total_supply);
-
-        // ── Step 2: read (or initialise) the provider's snapshot ─────────────────
-        //
-        // A provider that has never claimed before starts with acc_at_snapshot = 0
-        // (the accumulator value at campaign start).  This means they would earn
-        // rewards for the entire elapsed window — BUT only weighted by their balance
-        // at the moment of this first claim, not by how long they actually held.
-        //
-        // To close this gap correctly without a deposit gate, we initialise a new
-        // provider's snapshot to the *current* accumulator value, so their first
-        // call to claim_rewards sets the baseline and yields zero pending rewards.
-        // Actual rewards start accruing from that first snapshot onward.
-        //
-        // Providers who held LP tokens since before the campaign started should call
-        // claim_rewards early (e.g. shortly after campaign start) to lock in their
-        // snapshot; thereafter every subsequent claim correctly captures the delta.
+        // ── Step 2: advance campaign accumulator to current time ─────────────────
+        
+        // Update campaign accumulator based on time elapsed and total LP supply
+        campaign = advance_accumulator(campaign, claim_time, total_supply);
+        
         let snapshot_key = DataKey::ProviderSnapshot(campaign_id, provider.clone());
         let snapshot: Option<ProviderSnapshot> = if env.storage().persistent().has(&snapshot_key) {
             extend_persistent_ttl(&env, &snapshot_key);
@@ -610,6 +611,58 @@ impl IncentiveCampaigns {
     fn require_governance(env: &Env, caller: &Address) {
         let gov: Address = env.storage().instance().get(&DataKey::Governance).unwrap();
         assert!(caller == &gov, "not governance");
+    }
+
+    fn campaign_accrual_time(campaign: &Campaign, now: u64) -> u64 {
+        if now <= campaign.start_time {
+            campaign.start_time
+        } else if now >= campaign.end_time {
+            campaign.end_time
+        } else {
+            now
+        }
+    }
+
+    fn checkpoint_campaign_rewards(
+        env: &Env,
+        campaign_id: u64,
+        campaign: &Campaign,
+        now: u64,
+    ) -> i128 {
+        let accrued_key = DataKey::CampaignAccruedRewards(campaign_id);
+        let last_accrual_key = DataKey::CampaignLastAccrualTime(campaign_id);
+
+        let mut accrued: i128 = env
+            .storage()
+            .persistent()
+            .get(&accrued_key)
+            .unwrap_or(0_i128);
+        let mut last_accrual: u64 = env
+            .storage()
+            .persistent()
+            .get(&last_accrual_key)
+            .unwrap_or(campaign.start_time);
+
+        let accrual_until = Self::campaign_accrual_time(campaign, now);
+        if last_accrual < campaign.start_time {
+            last_accrual = campaign.start_time;
+        } else if last_accrual > campaign.end_time {
+            last_accrual = campaign.end_time;
+        }
+
+        if accrual_until > last_accrual {
+            let elapsed = (accrual_until - last_accrual) as i128;
+            accrued += campaign.reward_rate * elapsed;
+            last_accrual = accrual_until;
+        }
+
+        env.storage().persistent().set(&accrued_key, &accrued);
+        extend_persistent_ttl(env, &accrued_key);
+        env.storage()
+            .persistent()
+            .set(&last_accrual_key, &last_accrual);
+        extend_persistent_ttl(env, &last_accrual_key);
+        accrued
     }
 }
 
@@ -867,7 +920,7 @@ mod tests {
             &gov_addr, &pool, &lp, &reward, &1_000, &10_000, &100, &1_000_000,
         );
         let id2 = client.create_campaign(
-            &gov_addr, &pool, &lp, &reward, &1_000, &20_000, &50, &500_000,
+            &gov_addr, &pool, &lp, &reward, &1_000, &20_000, &50, &1_000_000,
         );
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -1054,5 +1107,54 @@ mod tests {
 
         let active_page_2 = client.get_active_campaigns_paged(&2, &2);
         assert_eq!(active_page_2.len(), 0);
+    }
+
+    #[test]
+    fn test_rate_increase_checkpoints_prior_accrual() {
+        let (env, incentives, pool, lp, reward, provider, gov_addr) = setup();
+        let client = IncentiveCampaignsClient::new(&env, &incentives);
+        let id = client.create_campaign(
+            &gov_addr, &pool, &lp, &reward, &1_000, &5_000, &100, &2_000_000,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = 2_000);
+        let first_claim = client.claim_rewards(&provider, &id);
+        assert_eq!(first_claim, 99_900);
+
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+        client.set_campaign_rate(&gov_addr, &id, &200);
+
+        env.ledger().with_mut(|l| l.timestamp = 4_000);
+        let second_claim = client.claim_rewards(&provider, &id);
+        // Piecewise accrual:
+        // t=1_000..3_000 @ 100 = 200_000 pool rewards
+        // t=3_000..4_000 @ 200 = 200_000 pool rewards
+        // Provider owns 999_000 / 1_000_000 of LP supply => cumulative 399_600.
+        // After the first 99_900 claim, only 299_700 remains.
+        assert_eq!(second_claim, 299_700);
+    }
+
+    #[test]
+    fn test_rate_decrease_does_not_block_future_claims() {
+        let (env, incentives, pool, lp, reward, provider, gov_addr) = setup();
+        let client = IncentiveCampaignsClient::new(&env, &incentives);
+        let id = client.create_campaign(
+            &gov_addr, &pool, &lp, &reward, &1_000, &5_000, &200, &2_000_000,
+        );
+
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+        let first_claim = client.claim_rewards(&provider, &id);
+        assert_eq!(first_claim, 399_600);
+
+        env.ledger().with_mut(|l| l.timestamp = 3_000);
+        client.set_campaign_rate(&gov_addr, &id, &100);
+
+        env.ledger().with_mut(|l| l.timestamp = 4_000);
+        let second_claim = client.claim_rewards(&provider, &id);
+        // Piecewise accrual:
+        // t=1_000..3_000 @ 200 = 400_000 pool rewards
+        // t=3_000..4_000 @ 100 = 100_000 pool rewards
+        // Provider's cumulative share is 499_500, so 99_900 remains claimable.
+        assert_eq!(second_claim, 99_900);
     }
 }
