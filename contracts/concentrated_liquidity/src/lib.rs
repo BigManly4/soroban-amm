@@ -2441,8 +2441,8 @@ impl ConcentratedLiquidity {
             return 0;
         }
         let n = timestamps.len();
-        let mut lo_idx: Option<usize> = None;
-        let mut hi_idx: Option<usize> = None;
+        let mut lo_idx: Option<u32> = None;
+        let mut hi_idx: Option<u32> = None;
         for i in 0..n {
             let t = timestamps.get(i).unwrap();
             if t <= target_ts {
