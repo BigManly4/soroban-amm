@@ -3,7 +3,7 @@
 //! DEX aggregator — routes trades across multiple AMM and CL pools for best execution.
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, vec, Address, Env, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, Vec,
 };
 
 use amm::AmmPoolClient;
@@ -95,7 +95,6 @@ pub enum DataKey {
     Admin,
     Factory,
     MaxHops,
-    ClPools,
     RoutingTokens,
     ClPoolCount,
     ClPool(u32),
@@ -147,7 +146,6 @@ impl DexAggregator {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        let mut cl_pools: Vec<ClPoolInfo> = env
         Self::extend_ttl(&env);
         let count: u32 = env
             .storage()
@@ -193,17 +191,30 @@ impl DexAggregator {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        let mut cl_pools: Vec<ClPoolInfo> = env
+        Self::extend_ttl(&env);
+        let count: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::ClPools)
-            .unwrap_or_else(|| Vec::new(&env));
+            .get(&DataKey::ClPoolCount)
+            .unwrap_or(0);
 
-        for i in 0..cl_pools.len() {
-            let entry = cl_pools.get(i).unwrap();
+        for i in 0..count {
+            let entry: ClPoolInfo = env
+                .storage()
+                .instance()
+                .get(&DataKey::ClPool(i))
+                .unwrap();
             if entry.pool == pool {
-                cl_pools.remove(i);
-                env.storage().instance().set(&DataKey::ClPools, &cl_pools);
+                if i != count - 1 {
+                    let last: ClPoolInfo = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::ClPool(count - 1))
+                        .unwrap();
+                    env.storage().instance().set(&DataKey::ClPool(i), &last);
+                }
+                env.storage().instance().remove(&DataKey::ClPool(count - 1));
+                env.storage().instance().set(&DataKey::ClPoolCount, &(count - 1));
                 return;
             }
         }
