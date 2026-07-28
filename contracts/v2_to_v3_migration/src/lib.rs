@@ -1,4 +1,3 @@
-```rust
 //! V2 → V3 AMM Migration Contract (Issue #266)
 //!
 //! Atomically migrates a liquidity position from a V2 constant-product pool
@@ -586,4 +585,3 @@ mod tests {
         );
     }
 }
-```
