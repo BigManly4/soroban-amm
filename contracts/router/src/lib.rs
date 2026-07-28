@@ -11,6 +11,9 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
 use amm::AmmPoolClient;
 use factory::FactoryClient;
 
+const MIN_TTL: u32 = 172_800;
+const BUMP_TO: u32 = 518_400;
+
 #[contracttype]
 pub enum DataKey {
     Factory,
@@ -39,10 +42,11 @@ impl Router {
         min_amount_out: i128,
         deadline: u64,
     ) -> i128 {
+        Self::extend_ttl(&env);
         trader.require_auth();
         assert!(path.len() >= 2, "path must have at least 2 tokens");
         assert!(amount_in > 0, "amount_in must be positive");
-        
+
         if env.ledger().timestamp() > deadline {
             panic!("DeadlineExpired");
         }
@@ -62,7 +66,7 @@ impl Router {
                 .unwrap_or_else(|| panic!("no pool for hop {i}"));
 
             let hop_min_out = if i + 1 == hops { min_amount_out } else { 0 };
-            
+
             // Note: AmmPoolClient swap might take deadline and min_out. We pass max deadline and 0 min_out for intermediate hops if needed, or pass through.
             // The router itself enforces the overall slippage.
             current_amount = AmmPoolClient::new(&env, &pool).swap(
@@ -81,8 +85,81 @@ impl Router {
         current_amount
     }
 
+    pub fn swap_exact_out(
+        env: Env,
+        trader: Address,
+        path: Vec<Address>,
+        amount_out: i128,
+        max_in: i128,
+        deadline: u64,
+    ) -> i128 {
+        Self::extend_ttl(&env);
+        trader.require_auth();
+        assert!(path.len() >= 2, "path must have at least 2 tokens");
+        assert!(amount_out > 0, "amount_out must be positive");
+
+        if env.ledger().timestamp() > deadline {
+            panic!("DeadlineExpired");
+        }
+
+        let factory: Address = env.storage().instance().get(&DataKey::Factory).unwrap();
+        let factory_client = FactoryClient::new(&env, &factory);
+
+        let hops = path.len() - 1;
+        let mut amounts_in = Vec::new(&env);
+        amounts_in.push_back(amount_out);
+
+        let mut current_out = amount_out;
+        for i in (0..hops).rev() {
+            let token_in = path.get(i).unwrap();
+            let token_out = path.get(i + 1).unwrap();
+
+            let pool = factory_client
+                .get_pool(&token_in, &token_out)
+                .unwrap_or_else(|| panic!("no pool for hop {i}"));
+
+            let required_in =
+                AmmPoolClient::new(&env, &pool).get_amount_in(&token_out, &current_out);
+            amounts_in.push_front(required_in);
+            current_out = required_in;
+        }
+
+        let total_in = current_out;
+        if total_in > max_in {
+            panic!("Slippage exceeded");
+        }
+
+        let mut current_amount_in = total_in;
+        for i in 0..hops {
+            let token_in = path.get(i).unwrap();
+            let token_out = path.get(i + 1).unwrap();
+
+            let pool = factory_client
+                .get_pool(&token_in, &token_out)
+                .unwrap_or_else(|| panic!("no pool for hop {i}"));
+
+            let expected_out = amounts_in.get(i + 1).unwrap();
+
+            let actual_out = AmmPoolClient::new(&env, &pool).swap(
+                &trader,
+                &token_in,
+                &current_amount_in,
+                &expected_out,
+                &deadline,
+            );
+
+            if actual_out < expected_out {
+                panic!("Slippage exceeded");
+            }
+            current_amount_in = actual_out;
+        }
+
+        total_in
+    }
+
     /// Quote the output of a multi-hop swap without executing it.
     pub fn get_amount_out_path(env: Env, path: Vec<Address>, amount_in: i128) -> i128 {
+        Self::extend_ttl(&env);
         assert!(path.len() >= 2, "path must have at least 2 tokens");
         assert!(amount_in > 0, "amount_in must be positive");
 
@@ -111,20 +188,24 @@ impl Router {
     pub fn get_factory(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Factory).unwrap()
     }
+
+    fn extend_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(MIN_TTL, BUMP_TO);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use amm::AmmPool;
+    use factory::{Factory, FactoryClient};
+    use soroban_sdk::token::{StellarAssetClient, TokenClient};
+    use soroban_sdk::String;
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         Env,
     };
-    use factory::{Factory, FactoryClient};
-    use amm::AmmPool;
-    use soroban_sdk::token::{StellarAssetClient, TokenClient};
     use token::{LpToken, LpTokenClient};
-    use soroban_sdk::String;
 
     fn setup_env_and_router() -> (Env, Address, Address, Address, Address, Address, Address) {
         let env = Env::default();
@@ -143,9 +224,15 @@ mod tests {
         let router = RouterClient::new(&env, &router_addr);
         router.initialize(&factory_addr);
 
-        let token1 = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let token2 = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let token3 = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token1 = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token2 = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token3 = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
 
         // fee_tier 2 = 30 bps (Medium); governance_wasm_hash = None
         factory.create_pool(&admin, &token1, &token2, &2_i128, &None);
@@ -164,8 +251,20 @@ mod tests {
         StellarAssetClient::new(&env, &token2).mint(&lp, &10_000_000_i128);
         StellarAssetClient::new(&env, &token3).mint(&lp, &10_000_000_i128);
 
-        amm::AmmPoolClient::new(&env, &pool1_addr).add_liquidity(&lp, &1_000_000, &1_000_000, &0, &u64::MAX);
-        amm::AmmPoolClient::new(&env, &pool2_addr).add_liquidity(&lp, &1_000_000, &1_000_000, &0, &u64::MAX);
+        amm::AmmPoolClient::new(&env, &pool1_addr).add_liquidity(
+            &lp,
+            &1_000_000,
+            &1_000_000,
+            &0,
+            &u64::MAX,
+        );
+        amm::AmmPoolClient::new(&env, &pool2_addr).add_liquidity(
+            &lp,
+            &1_000_000,
+            &1_000_000,
+            &0,
+            &u64::MAX,
+        );
 
         (env, router_addr, trader, token1, token2, token3, pool1_addr)
     }
@@ -187,7 +286,7 @@ mod tests {
     #[should_panic(expected = "contract call failed")]
     fn test_slippage_exceeded() {
         let (env, router_addr, trader, token1, token2, token3, _) = setup_env_and_router();
-        
+
         let router = RouterClient::new(&env, &router_addr);
         let path = soroban_sdk::vec![&env, token1.clone(), token2.clone(), token3.clone()];
         router.swap_exact_in(&trader, &path, &100_000, &1_000_000_000, &u64::MAX);
@@ -196,10 +295,10 @@ mod tests {
     #[test]
     fn test_successful_route_execution() {
         let (env, router_addr, trader, token1, token2, token3, _) = setup_env_and_router();
-        
+
         let router = RouterClient::new(&env, &router_addr);
         let path = soroban_sdk::vec![&env, token1.clone(), token2.clone(), token3.clone()];
-        
+
         let out = router.swap_exact_in(&trader, &path, &10_000, &0, &u64::MAX);
         assert!(out > 0);
     }
@@ -208,15 +307,16 @@ mod tests {
     #[should_panic(expected = "contract call failed")]
     fn test_atomic_revert_behavior() {
         let (env, router_addr, trader, token1, token2, token3, pool1_addr) = setup_env_and_router();
-        
+
         let router = RouterClient::new(&env, &router_addr);
         let path = soroban_sdk::vec![&env, token1.clone(), token2.clone(), token3.clone()];
-        
-        let pool1_token1_bal_before = soroban_sdk::token::TokenClient::new(&env, &token1).balance(&pool1_addr);
-        
+
+        let pool1_token1_bal_before =
+            soroban_sdk::token::TokenClient::new(&env, &token1).balance(&pool1_addr);
+
         // This will panic, the state should be reverted
         router.swap_exact_in(&trader, &path, &10_000, &1_000_000, &u64::MAX);
-        
+
         // Since it panics, the test will pass, and in actual Soroban the state would revert.
     }
 }
