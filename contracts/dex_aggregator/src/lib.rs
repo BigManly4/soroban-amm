@@ -6,7 +6,7 @@ use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, vec, Address, Env, Vec,
 };
 
-use amm::{AmmPoolClient, PoolInfo};
+use amm::AmmPoolClient;
 use factory::FactoryClient;
 
 const MIN_TTL: u32 = 172_800;
@@ -94,6 +94,8 @@ pub struct RouteQuote {
 pub enum DataKey {
     Factory,
     MaxHops,
+    ClPools,
+    RoutingTokens,
     ClPoolCount,
     ClPool(u32),
 }
@@ -172,6 +174,10 @@ impl DexAggregator {
         env.storage()
             .instance()
             .set(&DataKey::ClPoolCount, &(count + 1));
+    }
+
+    pub fn set_routing_tokens(env: Env, tokens: Vec<Address>) {
+        env.storage().instance().set(&DataKey::RoutingTokens, &tokens);
     }
 
     /// Find the best route up to `max_hops` pools deep (#319).
@@ -283,7 +289,7 @@ impl DexAggregator {
     ) -> Result<RouteQuote, AggregatorError> {
         let factory: Address = env.storage().instance().get(&DataKey::Factory).unwrap();
         let factory_client = FactoryClient::new(env, &factory);
-        let tokens = Self::discover_tokens(env, &factory_client);
+        let tokens = Self::discover_tokens(env, token_in, token_out);
 
         let mut best_out: i128 = 0;
         let mut best_hops: Vec<RouteHop> = Vec::new(env);
@@ -506,15 +512,14 @@ impl DexAggregator {
         }
     }
 
-    fn discover_tokens(env: &Env, factory: &FactoryClient) -> Vec<Address> {
-        let pools = factory.all_pools();
-        let mut tokens: Vec<Address> = Vec::new(env);
-        for i in 0..pools.len() {
-            let pool = pools.get(i).unwrap();
-            let info: PoolInfo = AmmPoolClient::new(env, &pool).get_info();
-            Self::push_unique(&mut tokens, info.token_a);
-            Self::push_unique(&mut tokens, info.token_b);
-        }
+    fn discover_tokens(env: &Env, token_in: &Address, token_out: &Address) -> Vec<Address> {
+        let mut tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoutingTokens)
+            .unwrap_or_else(|| Vec::new(env));
+        Self::push_unique(&mut tokens, token_in.clone());
+        Self::push_unique(&mut tokens, token_out.clone());
 
         let cl_count: u32 = env.storage().instance().get(&DataKey::ClPoolCount).unwrap_or(0);
         for i in 0..cl_count {
@@ -629,7 +634,7 @@ mod tests {
         let cl_pool = Address::generate(&env);
         agg.register_cl_pool(&cl_pool, &token_a, &token_b, &30_i128);
 
-        let tokens = DexAggregator::discover_tokens(&env, &factory);
+        let tokens = DexAggregator::discover_tokens(&env, &token_a, &token_b);
         assert_eq!(tokens.len(), 2);
 
         let mut found_a = false;
