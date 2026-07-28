@@ -42,6 +42,20 @@ pub enum DataKey {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PoolType {
+    Amm,
+    Cl,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrackedPool {
+    pub address: Address,
+    pub pool_type: PoolType,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiquiditySnapshot {
     pub cum_liquidity: i128,
     pub pool_ts: u64,
@@ -89,7 +103,7 @@ impl TwalConsumer {
             Self::SNAPSHOT_TTL_LEDGERS / 2,
             Self::SNAPSHOT_TTL_LEDGERS,
         );
-        Self::register_tracked_pool(&env, &pool);
+        Self::register_tracked_pool(&env, &pool, PoolType::Amm);
         Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
         Ok(())
     }
@@ -159,25 +173,34 @@ impl TwalConsumer {
         }
     }
 
-    fn register_tracked_pool(env: &Env, pool: &Address) {
-        let mut tracked: Vec<Address> = env
+    fn register_tracked_pool(env: &Env, pool: &Address, pool_type: PoolType) {
+        let mut tracked: Vec<TrackedPool> = env
             .storage()
             .persistent()
             .get(&DataKey::TrackedPoolsPersistent)
             .unwrap_or_else(|| Vec::new(env));
+
         let mut already = false;
+
         for i in 0..tracked.len() {
-            if tracked.get(i).unwrap() == *pool {
+            let item = tracked.get(i).unwrap();
+            if item.address == *pool {
                 already = true;
                 break;
             }
         }
+
         if !already {
-            tracked.push_back(pool.clone());
+            tracked.push_back(TrackedPool {
+                address: pool.clone(),
+                pool_type,
+            });
         }
+
         env.storage()
             .persistent()
             .set(&DataKey::TrackedPoolsPersistent, &tracked);
+
         env.storage().persistent().extend_ttl(
             &DataKey::TrackedPoolsPersistent,
             Self::SNAPSHOT_TTL_LEDGERS / 2,
@@ -220,14 +243,30 @@ impl TwalConsumer {
         let tracked = Self::get_tracked_pools(env.clone());
         let mut results: Vec<(Address, i128)> = Vec::new(&env);
         for i in 0..tracked.len() {
-            let pool = tracked.get(i).unwrap();
-            let twal = Self::get_twal_liquidity(env.clone(), pool.clone(), window_seconds)?;
-            results.push_back((pool, twal));
+            let tracked_pool = tracked.get(i).unwrap();
+
+            let twal = match tracked_pool.pool_type {
+                PoolType::Amm => Self::get_twal_liquidity(
+                    env.clone(),
+                    tracked_pool.address.clone(),
+                    window_seconds,
+                )?,
+
+                PoolType::Cl => {
+                    Self::get_cl_twal(
+                        env.clone(),
+                        tracked_pool.address.clone(),
+                        window_seconds,
+                    )
+                }
+            };
+
+            results.push_back((tracked_pool.address, twal));
         }
         Ok(results)
     }
 
-    pub fn get_tracked_pools(env: Env) -> Vec<Address> {
+    pub fn get_tracked_pools(env: Env) -> Vec<TrackedPool> {
         env.storage()
             .persistent()
             .get(&DataKey::TrackedPoolsPersistent)
@@ -250,7 +289,7 @@ impl TwalConsumer {
             Self::SNAPSHOT_TTL_LEDGERS / 2,
             Self::SNAPSHOT_TTL_LEDGERS,
         );
-        Self::register_tracked_pool(&env, &pool);
+        Self::register_tracked_pool(&env, &pool, PoolType::Cl);
         Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
         Ok(())
     }

@@ -10,7 +10,7 @@
 
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env};
 
-use crate::types::{LiquidityQuote, PoolInfo, SdkAmmError, SwapInQuote, SwapOutQuote};
+use crate::types::{LiquidityQuote, PoolInfo, SdkAmmError, SwapInQuote, SwapOutQuote, SwapSimulation};
 
 // ── Re-export the auto-generated contract client ──────────────────────────────
 
@@ -97,8 +97,7 @@ pub trait AmmPoolInterface {
         env: Env,
         token_in: Address,
         amount_in: i128,
-    ) -> Result<crate::types::PoolInfo, SdkAmmError>;
-
+    ) -> Result<SwapSimulation, SdkAmmError>;
     fn price_ratio(env: Env) -> Result<(i128, i128), SdkAmmError>;
 
     fn get_info(env: Env) -> PoolInfo;
@@ -543,4 +542,3 @@ fn isqrt(n: i128) -> i128 {
 
     x
 }
-````
