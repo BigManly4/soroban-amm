@@ -355,8 +355,9 @@ impl<'a> AmmPoolSdk<'a> {
     /// Estimate LP shares minted for depositing `amount_a` and `amount_b`.
     ///
     /// On an empty pool (first deposit) any ratio is accepted and shares equal
-    /// the geometric mean. On a non-empty pool the lesser of the two ratios
-    /// is used, matching the on-chain logic.
+    /// the geometric mean, minus the `MINIMUM_LIQUIDITY` amount permanently
+    /// locked on-chain to prevent full pool drainage. On a non-empty pool the
+    /// lesser of the two ratios is used, matching the on-chain logic.
     pub fn quote_add_liquidity(
         &self,
         amount_a: i128,
@@ -373,7 +374,12 @@ impl<'a> AmmPoolSdk<'a> {
         let reserve_b = info.reserve_b;
 
         let shares = if total_shares == 0 {
-            isqrt(amount_a * amount_b)
+            const MINIMUM_LIQUIDITY: i128 = 1_000;
+            let raw_shares = isqrt(amount_a * amount_b);
+            if raw_shares <= MINIMUM_LIQUIDITY {
+                return Err(SdkAmmError::InsufficientShares);
+            }
+            raw_shares - MINIMUM_LIQUIDITY
         } else {
             let shares_a =
                 amount_a * total_shares / reserve_a;
