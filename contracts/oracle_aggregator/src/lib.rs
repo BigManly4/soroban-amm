@@ -219,7 +219,10 @@ impl OracleAggregator {
 
             let client = OracleSourceAdapterClient::new(env, &source.source_contract);
 
-            let (price, source_timestamp) = client.quote(&token_a, &token_b);
+            let (price, source_timestamp) = match client.try_quote(&token_a, &token_b) {
+                Ok(Ok(res)) => res,
+                _ => (0, 0),
+            };
 
             let is_fresh = source_timestamp > 0
                 && source_timestamp <= now
