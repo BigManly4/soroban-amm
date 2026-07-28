@@ -1,4 +1,3 @@
-````rust
 //! High-level AMM client wrapping every contract entry point.
 //!
 //! [`AmmPoolSdk`] is the primary entry point for on-chain usage (cross-contract
