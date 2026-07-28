@@ -14,8 +14,8 @@
 //! [`OracleAggregator::set_max_deviation_bps`].
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype,
-    panic_with_error, symbol_short, Address, Env, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, Env, Vec,
 };
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -158,6 +158,10 @@ impl OracleAggregator {
             panic_with_error!(&env, OracleError::SourceNotFound);
         }
 
+        if new_sources.len() < MIN_VALID_SOURCES {
+            panic_with_error!(&env, OracleError::InsufficientSources);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::Sources, &new_sources);
@@ -189,8 +193,11 @@ impl OracleAggregator {
     ) -> AggregatedPrice {
         let sources = read_sources(env);
 
-        if sources.len() == 0 {
-            return AggregatedPrice { price: 0, confidence: 0 };
+        if sources.is_empty() {
+            return AggregatedPrice {
+                price: 0,
+                confidence: 0,
+            };
         }
 
         let now = env.ledger().timestamp();
@@ -212,7 +219,10 @@ impl OracleAggregator {
 
             let client = OracleSourceAdapterClient::new(env, &source.source_contract);
 
-            let (price, source_timestamp) = client.quote(&token_a, &token_b);
+            let (price, source_timestamp) = match client.try_quote(&token_a, &token_b) {
+                Ok(Ok(res)) => res,
+                _ => (0, 0),
+            };
 
             let is_fresh = source_timestamp > 0
                 && source_timestamp <= now
@@ -234,13 +244,16 @@ impl OracleAggregator {
             updated.push_back(source);
         }
 
-        if !stale_sources.is_empty() {
+        if persist_sources && !stale_sources.is_empty() {
             env.events()
                 .publish((symbol_short!("stale_src"),), (stale_sources,));
         }
 
         if prices.len() < MIN_VALID_SOURCES {
-            return AggregatedPrice { price: 0, confidence: 0 };
+            return AggregatedPrice {
+                price: 0,
+                confidence: 0,
+            };
         }
 
         if persist_sources {
@@ -266,7 +279,7 @@ impl OracleAggregator {
             }
         }
 
-        if !deviant_sources.is_empty() {
+        if persist_sources && !deviant_sources.is_empty() {
             env.events()
                 .publish((symbol_short!("deviant"),), (deviant_sources,));
         }
@@ -274,7 +287,10 @@ impl OracleAggregator {
         // Too few sources agree — a high-variance quote set. Report no
         // confidence rather than a price that only looks corroborated.
         if agreeing.len() < MIN_VALID_SOURCES {
-            return AggregatedPrice { price: 0, confidence: 0 };
+            return AggregatedPrice {
+                price: 0,
+                confidence: 0,
+            };
         }
 
         // Report the median of the agreeing subset so a dropped outlier does
@@ -406,7 +422,7 @@ fn median_i128(env: &Env, values: &Vec<i128>) -> i128 {
 
     let mid = sorted.len() / 2;
 
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         let lo = sorted.get_unchecked(mid - 1);
         let hi = sorted.get_unchecked(mid);
         // Midpoint via `lo + (hi - lo) / 2` rather than `(lo + hi) / 2`.

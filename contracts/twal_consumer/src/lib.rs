@@ -2,7 +2,9 @@
 
 //! TWAL (time-weighted average liquidity) consumer contract.
 
-use soroban_sdk::{contract, contractclient, contractimpl, contracterror, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec,
+};
 
 #[contractclient(name = "AmmPoolLiquidityClient")]
 pub trait AmmPoolLiquidityOracle {
@@ -38,6 +40,20 @@ pub enum DataKey {
     SnapshotTimestamps(Address),
     /// Running liquidity-cumulative state for a CL pool (see `save_cl_snapshot`).
     ClAccumulator(Address),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PoolType {
+    Amm,
+    Cl,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrackedPool {
+    pub address: Address,
+    pub pool_type: PoolType,
 }
 
 #[contracttype]
@@ -97,7 +113,10 @@ impl TwalConsumer {
         Self::require_keeper(&env)?;
         let (cum, pool_ts) = AmmPoolLiquidityClient::new(&env, &pool).get_liquidity_cumulative();
         let ledger_ts = env.ledger().timestamp();
-        let snapshot = LiquiditySnapshot { cum_liquidity: cum, pool_ts };
+        let snapshot = LiquiditySnapshot {
+            cum_liquidity: cum,
+            pool_ts,
+        };
         let key = DataKey::LiquiditySnapshot(pool.clone(), ledger_ts);
         env.storage().persistent().set(&key, &snapshot);
         env.storage().persistent().extend_ttl(
@@ -105,7 +124,7 @@ impl TwalConsumer {
             Self::SNAPSHOT_TTL_LEDGERS / 2,
             Self::SNAPSHOT_TTL_LEDGERS,
         );
-        Self::register_tracked_pool(&env, &pool);
+        Self::register_tracked_pool(&env, &pool, PoolType::Amm);
         Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
         Ok(())
     }
@@ -121,7 +140,7 @@ impl TwalConsumer {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(env));
-        if timestamps.last().map_or(true, |last| last != ts) {
+        if timestamps.last() != Some(ts) {
             timestamps.push_back(ts);
         }
         env.storage().persistent().set(&key, &timestamps);
@@ -175,25 +194,34 @@ impl TwalConsumer {
         }
     }
 
-    fn register_tracked_pool(env: &Env, pool: &Address) {
-        let mut tracked: Vec<Address> = env
+    fn register_tracked_pool(env: &Env, pool: &Address, pool_type: PoolType) {
+        let mut tracked: Vec<TrackedPool> = env
             .storage()
             .persistent()
             .get(&DataKey::TrackedPoolsPersistent)
             .unwrap_or_else(|| Vec::new(env));
+
         let mut already = false;
+
         for i in 0..tracked.len() {
-            if tracked.get(i).unwrap() == *pool {
+            let item = tracked.get(i).unwrap();
+            if item.address == *pool {
                 already = true;
                 break;
             }
         }
+
         if !already {
-            tracked.push_back(pool.clone());
+            tracked.push_back(TrackedPool {
+                address: pool.clone(),
+                pool_type,
+            });
         }
+
         env.storage()
             .persistent()
             .set(&DataKey::TrackedPoolsPersistent, &tracked);
+
         env.storage().persistent().extend_ttl(
             &DataKey::TrackedPoolsPersistent,
             Self::SNAPSHOT_TTL_LEDGERS / 2,
@@ -201,7 +229,11 @@ impl TwalConsumer {
         );
     }
 
-    pub fn get_twal_liquidity(env: Env, pool: Address, window_seconds: u64) -> Result<i128, TwalError> {
+    pub fn get_twal_liquidity(
+        env: Env,
+        pool: Address,
+        window_seconds: u64,
+    ) -> Result<i128, TwalError> {
         if window_seconds == 0 {
             return Err(TwalError::ZeroWindow);
         }
@@ -232,14 +264,30 @@ impl TwalConsumer {
         let tracked = Self::get_tracked_pools(env.clone());
         let mut results: Vec<(Address, i128)> = Vec::new(&env);
         for i in 0..tracked.len() {
-            let pool = tracked.get(i).unwrap();
-            let twal = Self::get_twal_liquidity(env.clone(), pool.clone(), window_seconds)?;
-            results.push_back((pool, twal));
+            let tracked_pool = tracked.get(i).unwrap();
+
+            let twal = match tracked_pool.pool_type {
+                PoolType::Amm => Self::get_twal_liquidity(
+                    env.clone(),
+                    tracked_pool.address.clone(),
+                    window_seconds,
+                )?,
+
+                PoolType::Cl => {
+                    Self::get_cl_twal(
+                        env.clone(),
+                        tracked_pool.address.clone(),
+                        window_seconds,
+                    )
+                }
+            };
+
+            results.push_back((tracked_pool.address, twal));
         }
         Ok(results)
     }
 
-    pub fn get_tracked_pools(env: Env) -> Vec<Address> {
+    pub fn get_tracked_pools(env: Env) -> Vec<TrackedPool> {
         env.storage()
             .persistent()
             .get(&DataKey::TrackedPoolsPersistent)
@@ -290,6 +338,9 @@ impl TwalConsumer {
         let snapshot = LiquiditySnapshot {
             cum_liquidity: cum,
             pool_ts: ledger_ts,
+        let snapshot = LiquiditySnapshot {
+            cum_liquidity: active,
+            pool_ts,
         };
         let key = DataKey::LiquiditySnapshot(pool.clone(), ledger_ts);
         env.storage().persistent().set(&key, &snapshot);
@@ -298,7 +349,7 @@ impl TwalConsumer {
             Self::SNAPSHOT_TTL_LEDGERS / 2,
             Self::SNAPSHOT_TTL_LEDGERS,
         );
-        Self::register_tracked_pool(&env, &pool);
+        Self::register_tracked_pool(&env, &pool, PoolType::Cl);
         Self::record_snapshot_timestamp(&env, &pool, ledger_ts);
         Ok(())
     }
@@ -404,14 +455,24 @@ mod tests {
         let (ta, ta_sac) = create_sac(&env, &admin);
         let (tb, tb_sac) = create_sac(&env, &admin);
         AmmPoolClient::new(&env, &amm_addr).initialize(
-            &admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128,
+            &admin,
+            &ta.address,
+            &tb.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
         );
 
         let provider = Address::generate(&env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &1_000_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &1_000_000_i128,
+            &1_000_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let consumer = TwalConsumerClient::new(&env, &consumer_addr);
@@ -422,7 +483,11 @@ mod tests {
         ta_sac.mint(&provider, &200_000_i128);
         tb_sac.mint(&provider, &200_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &100_000_i128, &100_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &100_000_i128,
+            &100_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
         consumer.save_snapshot(&amm_addr);
 
@@ -430,7 +495,11 @@ mod tests {
         let trader = Address::generate(&env);
         ta_sac.mint(&trader, &1_000_i128);
         AmmPoolClient::new(&env, &amm_addr).swap(
-            &trader, &ta.address, &1_000_i128, &0_i128, &u64::MAX,
+            &trader,
+            &ta.address,
+            &1_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let twal = consumer.get_twal_liquidity(&amm_addr, &600);
@@ -521,14 +590,24 @@ mod tests {
         let (ta, ta_sac) = create_sac(&env, &admin);
         let (tb, tb_sac) = create_sac(&env, &admin);
         AmmPoolClient::new(&env, &amm_addr).initialize(
-            &admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128,
+            &admin,
+            &ta.address,
+            &tb.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
         );
 
         let provider = Address::generate(&env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &1_000_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &1_000_000_i128,
+            &1_000_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let consumer = TwalConsumerClient::new(&env, &consumer_addr);
@@ -571,14 +650,24 @@ mod tests {
         let (ta, ta_sac) = create_sac(&env, &admin);
         let (tb, tb_sac) = create_sac(&env, &admin);
         AmmPoolClient::new(&env, &amm_addr).initialize(
-            &admin, &ta.address, &tb.address, &lp_addr, &30_i128, &admin, &0_i128,
+            &admin,
+            &ta.address,
+            &tb.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
         );
 
         let provider = Address::generate(&env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &1_000_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &1_000_000_i128, &1_000_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &1_000_000_i128,
+            &1_000_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
 
         let consumer = TwalConsumerClient::new(&env, &consumer_addr);
@@ -590,7 +679,11 @@ mod tests {
         ta_sac.mint(&provider, &100_000_i128);
         tb_sac.mint(&provider, &100_000_i128);
         AmmPoolClient::new(&env, &amm_addr).add_liquidity(
-            &provider, &100_000_i128, &100_000_i128, &0_i128, &u64::MAX,
+            &provider,
+            &100_000_i128,
+            &100_000_i128,
+            &0_i128,
+            &u64::MAX,
         );
         consumer.save_snapshot(&amm_addr);
 

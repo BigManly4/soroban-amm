@@ -72,6 +72,21 @@ fn deploy_source(env: &Env, price: i128) -> Address {
     id
 }
 
+#[contract]
+struct PanickingMockAdapter;
+
+#[contractimpl]
+impl PanickingMockAdapter {
+    pub fn quote(_env: Env, _token_a: Address, _token_b: Address) -> (i128, u64) {
+        panic!("simulated source panic");
+    }
+}
+
+fn deploy_panicking_source(env: &Env) -> Address {
+    env.register_contract(None, PanickingMockAdapter)
+}
+
+
 fn set_now(env: &Env, ts: u64) {
     env.ledger().set(LedgerInfo {
         timestamp: ts,
@@ -307,8 +322,8 @@ fn stale_src_event_emitted_when_sources_skipped() {
     let h = deploy(&env, 60);
 
     let s1 = deploy_source(&env, 100); // healthy
-    let s2 = deploy_source(&env, 0);   // price=0 → skipped
-    let s3 = deploy_source(&env, 0);   // price=0 → skipped
+    let s2 = deploy_source(&env, 0); // price=0 → skipped
+    let s3 = deploy_source(&env, 0); // price=0 → skipped
 
     h.aggregator
         .register_source(&h.admin, &s1, &OracleSourceType::AmmTwap);
@@ -345,7 +360,10 @@ fn stale_src_event_emitted_when_sources_skipped() {
 fn get_max_deviation_bps_defaults_to_constant() {
     let env = Env::default();
     let h = deploy(&env, 600);
-    assert_eq!(h.aggregator.get_max_deviation_bps(), DEFAULT_MAX_DEVIATION_BPS);
+    assert_eq!(
+        h.aggregator.get_max_deviation_bps(),
+        DEFAULT_MAX_DEVIATION_BPS
+    );
 }
 
 #[test]
@@ -503,3 +521,29 @@ fn deviant_event_lists_out_of_band_sources() {
     assert_eq!(deviant_addrs.len(), 1);
     assert!(deviant_addrs.contains(&s3));
 }
+
+#[test]
+fn panicking_source_is_skipped_and_does_not_abort_aggregation() {
+    let env = Env::default();
+    let h = deploy(&env, 600);
+
+    let honest1 = deploy_source(&env, 100);
+    let honest2 = deploy_source(&env, 102);
+    let panicker = deploy_panicking_source(&env);
+
+    h.aggregator
+        .register_source(&h.admin, &honest1, &OracleSourceType::AmmTwap);
+    h.aggregator
+        .register_source(&h.admin, &honest2, &OracleSourceType::ClTwap);
+    h.aggregator
+        .register_source(&h.admin, &panicker, &OracleSourceType::External);
+
+    set_now(&env, 1_000);
+
+    // Panicking source shouldn't bring down the aggregation.
+    // Median of (100, 102) is 101, confidence is 2.
+    let result = h.aggregator.get_price(&h.token_a, &h.token_b);
+    assert_eq!(result.price, 101);
+    assert_eq!(result.confidence, 2);
+}
+

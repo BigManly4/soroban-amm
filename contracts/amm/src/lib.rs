@@ -518,9 +518,20 @@ impl AmmPool {
             );
         }
 
-        // Zero out reserves
+        // Zero out reserves and total shares so the pool is in a clean empty
+        // state. Leaving TotalShares non-zero while reserves are 0 would cause
+        // add_liquidity to divide by zero (reserve_a == 0 in the proportional
+        // shares formula), permanently bricking deposits. Resetting
+        // MinLiquidityLocked allows the first re-deposit to re-establish the
+        // minimum-liquidity lock correctly. (Fixes #569)
         env.storage().instance().set(&DataKey::ReserveA, &0_i128);
         env.storage().instance().set(&DataKey::ReserveB, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLiquidityLocked, &false);
 
         // Emit event for audit trail
         soroban_amm_sdk::emit_versioned_event!(
@@ -933,7 +944,23 @@ impl AmmPool {
             } else {
                 soroban_sdk::Vec::new(&env)
             };
-        if !approvals.contains(&signer) {
+        // Only record a new approval — and only refresh the expiry window — when
+        // this signer has not already approved the same recipient.
+        //
+        // A brand-new proposal (first proposal, or a recipient change which resets
+        // the approval set above) always starts from an empty approval set, so the
+        // proposer is a *new* approval and is granted a fresh TTL window.
+        //
+        // Crucially, re-calling with an already-approved signer must NOT extend
+        // `MultisigProposalExpiresAt`. Otherwise a single signer could keep a stuck
+        // proposal (e.g. 1 of 3 required approvals) alive forever by periodically
+        // re-proposing with their own address and the same recipient, defeating the
+        // `ProposalExpired` freshness/security check on stale multisig proposals.
+        // Since each signer can only add a new approval once (approvals never
+        // contain duplicates and are only cleared on execution or a recipient
+        // change), the expiry can no longer be refreshed indefinitely.
+        let added_approval = !approvals.contains(&signer);
+        if added_approval {
             approvals.push_back(signer.clone());
         }
         env.storage().instance().set(
@@ -943,10 +970,12 @@ impl AmmPool {
         env.storage()
             .instance()
             .set(&DataKey::MultisigProposalApprovals, &approvals);
-        env.storage().instance().set(
-            &DataKey::MultisigProposalExpiresAt,
-            &(env.ledger().timestamp() + MULTISIG_PROPOSAL_TTL_SECS),
-        );
+        if added_approval {
+            env.storage().instance().set(
+                &DataKey::MultisigProposalExpiresAt,
+                &(env.ledger().timestamp() + MULTISIG_PROPOSAL_TTL_SECS),
+            );
+        }
         env.storage()
             .instance()
             .set(&DataKey::MultisigProposalExecuted, &false);
@@ -1047,6 +1076,18 @@ impl AmmPool {
         }
         env.storage().instance().set(&DataKey::ReserveA, &0_i128);
         env.storage().instance().set(&DataKey::ReserveB, &0_i128);
+        // Zero TotalShares and reset MinLiquidityLocked so the pool is in a
+        // clean empty state after the drain. Leaving TotalShares non-zero
+        // while reserves are 0 causes add_liquidity to divide by zero in the
+        // proportional-shares formula, permanently bricking deposits.
+        // Resetting MinLiquidityLocked allows the first re-deposit to
+        // re-establish the minimum-liquidity lock correctly. (Fixes #569)
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLiquidityLocked, &false);
         // Mark executed so re-execution returns AlreadyExecuted.
         env.storage()
             .instance()
@@ -1646,6 +1687,7 @@ impl AmmPool {
 
         // Checkpoint TWAP before updating reserves.
         let (reserve_a, reserve_b) = Self::checkpoint_oracles(&env);
+        Self::check_circuit_breaker(&env)?;
 
         let owned = Self::shares_of(env.clone(), provider.clone());
         if owned < shares {
@@ -1671,7 +1713,7 @@ impl AmmPool {
         lp_client.burn(&provider, &shares);
 
         // Determine which token we keep and which we swap away.
-        let (_token_keep, _token_swap, amount_keep, amount_swap) = if token_out == token_a {
+        let (_token_keep, token_swap, amount_keep, amount_swap) = if token_out == token_a {
             (token_a.clone(), token_b.clone(), withdraw_a, withdraw_b)
         } else {
             (token_b.clone(), token_a.clone(), withdraw_b, withdraw_a)
@@ -1717,6 +1759,8 @@ impl AmmPool {
             // We're swapping token_a for more token_b.
             amount_swap_with_fee * new_reserve_b / (new_reserve_a * 10_000 + amount_swap_with_fee)
         };
+
+        Self::check_oracle_deviation(&env, &token_swap, &token_out, amount_swap, swap_output)?;
 
         // Total output is the amount we kept from withdrawal plus the swap output.
         let total_out = amount_keep + swap_output;
