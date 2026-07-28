@@ -615,6 +615,318 @@
         {
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "Position"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                },
+                {
+                  "i32": -100
+                },
+                {
+                  "i32": 100
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "Position"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                    },
+                    {
+                      "i32": -100
+                    },
+                    {
+                      "i32": 100
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "fee_growth_inside_a"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "fee_growth_inside_b"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "liquidity"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "lower_tick"
+                      },
+                      "val": {
+                        "i32": -100
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "tokens_owed"
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "i128": {
+                              "hi": 0,
+                              "lo": 0
+                            }
+                          },
+                          {
+                            "i128": {
+                              "hi": 0,
+                              "lo": 0
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "upper_tick"
+                      },
+                      "val": {
+                        "i32": 100
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          3110400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "Position"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                },
+                {
+                  "i32": 200
+                },
+                {
+                  "i32": 400
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "Position"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                    },
+                    {
+                      "i32": 200
+                    },
+                    {
+                      "i32": 400
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "fee_growth_inside_a"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "fee_growth_inside_b"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "liquidity"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 304858
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "lower_tick"
+                      },
+                      "val": {
+                        "i32": 200
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "tokens_owed"
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "i128": {
+                              "hi": 0,
+                              "lo": 0
+                            }
+                          },
+                          {
+                            "i128": {
+                              "hi": 0,
+                              "lo": 0
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "upper_tick"
+                      },
+                      "val": {
+                        "i32": 400
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          3110400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "PositionList"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "PositionList"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "vec": [
+                    {
+                      "vec": [
+                        {
+                          "i32": 200
+                        },
+                        {
+                          "i32": 400
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          3110400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
             "key": "ledger_key_contract_instance",
             "durability": "persistent"
           }
@@ -647,6 +959,18 @@
                             "hi": 0,
                             "lo": 0
                           }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Admin"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                         }
                       },
                       {
@@ -722,6 +1046,31 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "MaxOracleDeviationBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 500
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "OracleAggregator"
+                            }
+                          ]
+                        },
+                        "val": "void"
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "OraclePoint"
                             },
                             {
@@ -737,16 +1086,22 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "Position"
+                              "symbol": "Paused"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": false
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Tick"
                             },
                             {
-                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
-                            },
-                            {
-                              "i32": -100
-                            },
-                            {
-                              "i32": 100
+                              "i32": 200
                             }
                           ]
                         },
@@ -754,7 +1109,7 @@
                           "map": [
                             {
                               "key": {
-                                "symbol": "fee_growth_inside_a"
+                                "symbol": "fee_growth_outside_a"
                               },
                               "val": {
                                 "i128": {
@@ -765,7 +1120,7 @@
                             },
                             {
                               "key": {
-                                "symbol": "fee_growth_inside_b"
+                                "symbol": "fee_growth_outside_b"
                               },
                               "val": {
                                 "i128": {
@@ -776,50 +1131,32 @@
                             },
                             {
                               "key": {
-                                "symbol": "liquidity"
+                                "symbol": "initialized"
+                              },
+                              "val": {
+                                "bool": true
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "liquidity_gross"
                               },
                               "val": {
                                 "i128": {
                                   "hi": 0,
-                                  "lo": 0
+                                  "lo": 304858
                                 }
                               }
                             },
                             {
                               "key": {
-                                "symbol": "lower_tick"
+                                "symbol": "liquidity_net"
                               },
                               "val": {
-                                "i32": -100
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "tokens_owed"
-                              },
-                              "val": {
-                                "vec": [
-                                  {
-                                    "i128": {
-                                      "hi": 0,
-                                      "lo": 0
-                                    }
-                                  },
-                                  {
-                                    "i128": {
-                                      "hi": 0,
-                                      "lo": 0
-                                    }
-                                  }
-                                ]
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "upper_tick"
-                              },
-                              "val": {
-                                "i32": 100
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 304858
+                                }
                               }
                             }
                           ]
@@ -829,13 +1166,7 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "Position"
-                            },
-                            {
-                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
-                            },
-                            {
-                              "i32": 200
+                              "symbol": "Tick"
                             },
                             {
                               "i32": 400
@@ -846,7 +1177,7 @@
                           "map": [
                             {
                               "key": {
-                                "symbol": "fee_growth_inside_a"
+                                "symbol": "fee_growth_outside_a"
                               },
                               "val": {
                                 "i128": {
@@ -857,7 +1188,7 @@
                             },
                             {
                               "key": {
-                                "symbol": "fee_growth_inside_b"
+                                "symbol": "fee_growth_outside_b"
                               },
                               "val": {
                                 "i128": {
@@ -868,50 +1199,32 @@
                             },
                             {
                               "key": {
-                                "symbol": "liquidity"
+                                "symbol": "initialized"
+                              },
+                              "val": {
+                                "bool": true
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "liquidity_gross"
                               },
                               "val": {
                                 "i128": {
                                   "hi": 0,
-                                  "lo": 3000
+                                  "lo": 304858
                                 }
                               }
                             },
                             {
                               "key": {
-                                "symbol": "lower_tick"
+                                "symbol": "liquidity_net"
                               },
                               "val": {
-                                "i32": 200
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "tokens_owed"
-                              },
-                              "val": {
-                                "vec": [
-                                  {
-                                    "i128": {
-                                      "hi": 0,
-                                      "lo": 0
-                                    }
-                                  },
-                                  {
-                                    "i128": {
-                                      "hi": 0,
-                                      "lo": 0
-                                    }
-                                  }
-                                ]
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "upper_tick"
-                              },
-                              "val": {
-                                "i32": 400
+                                "i128": {
+                                  "hi": -1,
+                                  "lo": 18446744073709246758
+                                }
                               }
                             }
                           ]
@@ -921,26 +1234,36 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "PositionList"
+                              "symbol": "TickBitmap"
                             },
                             {
-                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                              "i32": 1
                             }
                           ]
                         },
                         "val": {
+                          "u128": {
+                            "hi": 256,
+                            "lo": 0
+                          }
+                        }
+                      },
+                      {
+                        "key": {
                           "vec": [
                             {
-                              "vec": [
-                                {
-                                  "i32": 200
-                                },
-                                {
-                                  "i32": 400
-                                }
-                              ]
+                              "symbol": "TickBitmap"
+                            },
+                            {
+                              "i32": 3
                             }
                           ]
+                        },
+                        "val": {
+                          "u128": {
+                            "hi": 0,
+                            "lo": 65536
+                          }
                         }
                       },
                       {
@@ -953,6 +1276,18 @@
                         },
                         "val": {
                           "i64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "TickSpacing"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i32": 1
                         }
                       },
                       {
@@ -1132,7 +1467,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 14263
+                          "lo": 15500
                         }
                       }
                     },
@@ -1205,7 +1540,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 5737
+                          "lo": 4500
                         }
                       }
                     },
@@ -1390,7 +1725,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 11250
+                          "lo": 12475
                         }
                       }
                     },
@@ -1463,7 +1798,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 8750
+                          "lo": 7525
                         }
                       }
                     },
@@ -1889,6 +2224,9 @@
             "data": {
               "vec": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                },
+                {
                   "address": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL"
                 },
                 {
@@ -1902,6 +2240,9 @@
                 },
                 {
                   "i32": 0
+                },
+                {
+                  "i32": 1
                 }
               ]
             }
@@ -2371,28 +2712,35 @@
             "data": {
               "vec": [
                 {
-                  "i32": -100
+                  "u32": 1
                 },
                 {
-                  "i32": 100
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 2487
-                  }
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 2512
-                  }
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 2487
-                  }
+                  "vec": [
+                    {
+                      "i32": -100
+                    },
+                    {
+                      "i32": 100
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 2487
+                      }
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 2512
+                      }
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 2487
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -2607,28 +2955,35 @@
             "data": {
               "vec": [
                 {
-                  "i32": 200
+                  "u32": 1
                 },
                 {
-                  "i32": 400
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 3000
-                  }
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 3000
-                  }
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 0
-                  }
+                  "vec": [
+                    {
+                      "i32": 200
+                    },
+                    {
+                      "i32": 400
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 304858
+                      }
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 3000
+                      }
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 0
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -3122,7 +3477,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 1249
+                    "lo": 12
                   }
                 }
               ]
@@ -3156,7 +3511,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 1249
+                "lo": 12
               }
             }
           }
@@ -3214,7 +3569,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 1237
+                    "lo": 12
                   }
                 }
               ]
@@ -3248,7 +3603,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 1237
+                "lo": 12
               }
             }
           }
@@ -3295,28 +3650,35 @@
             "data": {
               "vec": [
                 {
-                  "i32": -100
+                  "u32": 1
                 },
                 {
-                  "i32": 100
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 2487
-                  }
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 1249
-                  }
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 1237
-                  }
+                  "vec": [
+                    {
+                      "i32": -100
+                    },
+                    {
+                      "i32": 100
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 2487
+                      }
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 12
+                      }
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 12
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -3345,13 +3707,13 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 1249
+                    "lo": 12
                   }
                 },
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 1237
+                    "lo": 12
                   }
                 }
               ]

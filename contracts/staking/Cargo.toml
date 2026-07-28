@@ -15,5 +15,4 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-amm = { path = "../amm" }
 token = { path = "../token" }

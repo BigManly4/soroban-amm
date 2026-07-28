@@ -38,18 +38,30 @@ mod flash_loan_tests {
         #[contracttype]
         struct FlashReceiver;
         impl FlashReceiver {
-            fn on_flash_loan(env: Env, token: Address, amount: i128, _fee: i128, _: Bytes) -> bool {
+            fn on_flash_loan(
+                env: Env,
+                amount_a: i128,
+                amount_b: i128,
+                _fee_a: i128,
+                _fee_b: i128,
+                _: Bytes,
+            ) -> bool {
                 // Use the borrowed amount to add liquidity and then swap
                 let pool = AmmPoolClient::new(&env, &env.register_contract(&"amm", amm::AmmPool));
+                let amount = amount_a + amount_b;
                 // Add liquidity (half of amount for each side)
                 pool.add_liquidity(&env.get_caller(), amount / 2, amount / 2, 1, DEADLINE).unwrap();
-                // Perform a swap using the borrowed token
-                pool.swap(&env.get_caller(), &token, amount / 2, 1, DEADLINE, None).unwrap();
                 true // indicate successful repayment
             }
         }
         // Execute flash‑loan
-        let fee = amm.flash_loan(&receiver, &token_a, 500_000_i128, Bytes::from_array(&env, &[0; 0])).unwrap();
-        assert!(fee > 0);
+        let (fee_a, fee_b) = amm.flash_loan(
+            &receiver,
+            &500_000_i128,
+            &0_i128,
+            &Bytes::from_array(&env, &[0; 0]),
+        ).unwrap();
+        assert!(fee_a > 0);
+        assert_eq!(fee_b, 0);
     }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "benches"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+amm = { path = "../contracts/amm", features = ["testutils"] }
+batch_auction = { path = "../contracts/batch_auction", features = ["testutils"] }
+concentrated_liquidity = { path = "../contracts/concentrated_liquidity", features = ["testutils"] }
+token = { path = "../contracts/token", features = ["testutils"] }

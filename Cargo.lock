@@ -22,6 +22,7 @@ name = "amm"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "soroban-amm-sdk",
  "soroban-sdk",
  "token",
 ]
@@ -112,10 +113,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "batch_auction"
+version = "0.1.0"
+dependencies = [
+ "amm",
+ "concentrated_liquidity",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "batch_router"
 version = "0.1.0"
 dependencies = [
  "amm",
+ "factory",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
+name = "benches"
+version = "0.1.0"
+dependencies = [
+ "amm",
+ "batch_auction",
+ "concentrated_liquidity",
  "soroban-sdk",
  "token",
 ]
@@ -197,10 +220,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cl_position_nft"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "concentrated_liquidity"
 version = "0.1.0"
 dependencies = [
  "amm",
+ "cl_position_nft",
+ "soroban-amm-sdk",
  "soroban-sdk",
  "token",
 ]
@@ -363,6 +395,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dex-aggregator"
+version = "0.1.0"
+dependencies = [
+ "amm",
+ "factory",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -466,9 +508,9 @@ checksum = "2bfcf67fea2815c2fc3b90873fae90957be12ff417335dfadc7f52927feb03b2"
 
 [[package]]
 name = "ethnum"
-version = "1.5.2"
+version = "1.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca81e6b4777c89fd810c25a4be2b1bd93ea034fbe58e6a75216a34c6b82c539b"
+checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 
 [[package]]
 name = "factory"
@@ -477,6 +519,7 @@ dependencies = [
  "amm",
  "concentrated_liquidity",
  "governance",
+ "soroban-amm-sdk",
  "soroban-sdk",
  "token",
 ]
@@ -581,7 +624,9 @@ name = "governance"
 version = "0.1.0"
 dependencies = [
  "amm",
+ "concentrated_liquidity",
  "proptest",
+ "soroban-amm-sdk",
  "soroban-sdk",
  "token",
 ]
@@ -685,6 +730,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
+name = "incentive-campaigns"
+version = "0.1.0"
+dependencies = [
+ "amm",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -719,11 +773,15 @@ version = "0.1.0"
 dependencies = [
  "amm",
  "concentrated_liquidity",
+ "dex-aggregator",
  "factory",
  "governance",
+ "incentive-campaigns",
  "soroban-sdk",
  "token",
+ "twal-consumer",
  "twap-consumer",
+ "v2-to-v3-migration",
 ]
 
 [[package]]
@@ -878,6 +936,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "oracle-aggregator"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -903,6 +968,13 @@ checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
  "der",
  "spki",
+]
+
+[[package]]
+name = "pol_vesting"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1280,6 +1352,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "soroban-amm-sdk"
+version = "0.1.0"
+dependencies = [
+ "amm",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "soroban-builtin-sdk-macros"
 version = "21.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1485,7 +1566,6 @@ dependencies = [
 name = "staking"
 version = "0.1.0"
 dependencies = [
- "amm",
  "soroban-sdk",
  "token",
 ]
@@ -1618,6 +1698,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "twal-consumer"
+version = "0.1.0"
+dependencies = [
+ "amm",
+ "soroban-sdk",
+ "token",
+]
+
+[[package]]
 name = "twap-consumer"
 version = "0.1.0"
 dependencies = [
@@ -1649,6 +1738,15 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "v2-to-v3-migration"
+version = "0.1.0"
+dependencies = [
+ "soroban-amm-sdk",
+ "soroban-sdk",
+ "token",
+]
 
 [[package]]
 name = "version_check"

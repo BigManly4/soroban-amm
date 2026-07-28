@@ -35,3 +35,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reproducible contract build environment with Docker
 - Makefile with shortcuts for building, testing, linting, formatting, and end-to-end testing
 - Complete machine-readable ABI schema JSON (`docs/abi.json`) (#143)
+### Changed
+- `reserve_manager` docs clarify the contract is off-chain-only; on-chain AMM hookup is deferred (#518).

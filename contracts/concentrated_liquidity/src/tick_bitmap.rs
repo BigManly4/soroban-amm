@@ -37,7 +37,11 @@ pub fn next_initialized_tick_within_word(env: &Env, tick: i32, lte: bool) -> (i3
 
     if lte {
         // Mask out all bits above bit_pos, then find the highest set bit.
-        let mask = if bit_pos == 127 { u128::MAX } else { (1u128 << (bit_pos + 1)) - 1 };
+        let mask = if bit_pos == 127 {
+            u128::MAX
+        } else {
+            (1u128 << (bit_pos + 1)) - 1
+        };
         let masked = word & mask;
         if masked == 0 {
             // No initialized tick at or below `tick` in this word.
@@ -49,7 +53,11 @@ pub fn next_initialized_tick_within_word(env: &Env, tick: i32, lte: bool) -> (i3
         (tick_index, true)
     } else {
         // Mask out all bits below bit_pos, then find the lowest set bit.
-        let mask = if bit_pos == 0 { u128::MAX } else { u128::MAX.wrapping_shl(bit_pos as u32) };
+        let mask = if bit_pos == 0 {
+            u128::MAX
+        } else {
+            u128::MAX.wrapping_shl(bit_pos)
+        };
         let masked = word & mask;
         if masked == 0 {
             // No initialized tick at or above `tick` in this word.
@@ -79,90 +87,96 @@ fn tick_position(tick: i32) -> (i32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::Env;
     use crate::ConcentratedLiquidity;
+    use soroban_sdk::Env;
 
-    fn env_with_contract() -> Env {
+    fn env_with_contract() -> (Env, soroban_sdk::Address) {
         let env = Env::default();
-        env.register_contract(None, ConcentratedLiquidity);
-        env
+        env.mock_all_auths();
+        let addr = env.register_contract(None, ConcentratedLiquidity);
+        (env, addr)
     }
 
     #[test]
     fn flip_sets_and_clears_bit() {
-        let env = env_with_contract();
+        let (env, addr) = env_with_contract();
         let tick = 256i32; // word 2, bit 0
+        env.as_contract(&addr, || {
+            // Initially unset
+            let (_, found_before) = next_initialized_tick_within_word(&env, tick, false);
+            assert!(!found_before);
 
-        // Initially unset
-        let (_, found_before) = next_initialized_tick_within_word(&env, tick, false);
-        assert!(!found_before);
+            flip_tick(&env, tick);
+            let (t, found) = next_initialized_tick_within_word(&env, tick, false);
+            assert!(found);
+            assert_eq!(t, tick);
 
-        flip_tick(&env, tick);
-        let (t, found) = next_initialized_tick_within_word(&env, tick, false);
-        assert!(found);
-        assert_eq!(t, tick);
-
-        // Flip again to clear
-        flip_tick(&env, tick);
-        let (_, found_after) = next_initialized_tick_within_word(&env, tick, false);
-        assert!(!found_after);
+            // Flip again to clear
+            flip_tick(&env, tick);
+            let (_, found_after) = next_initialized_tick_within_word(&env, tick, false);
+            assert!(!found_after);
+        });
     }
 
     #[test]
     fn next_tick_lte_finds_correct_tick() {
-        let env = env_with_contract();
-        // Set tick 10 and tick 5 in word 0
-        flip_tick(&env, 10);
-        flip_tick(&env, 5);
+        let (env, addr) = env_with_contract();
+        env.as_contract(&addr, || {
+            // Set tick 10 and tick 5 in word 0
+            flip_tick(&env, 10);
+            flip_tick(&env, 5);
 
-        // From tick 8 searching downward, should find tick 5
-        let (t, found) = next_initialized_tick_within_word(&env, 8, true);
-        assert!(found);
-        assert_eq!(t, 5);
+            // From tick 8 searching downward, should find tick 5
+            let (t, found) = next_initialized_tick_within_word(&env, 8, true);
+            assert!(found);
+            assert_eq!(t, 5);
+        });
     }
 
     #[test]
     fn next_tick_gte_finds_correct_tick() {
-        let env = env_with_contract();
-        flip_tick(&env, 10);
-        flip_tick(&env, 20);
+        let (env, addr) = env_with_contract();
+        env.as_contract(&addr, || {
+            flip_tick(&env, 10);
+            flip_tick(&env, 20);
 
-        // From tick 12, searching upward, should find 20
-        let (t, found) = next_initialized_tick_within_word(&env, 12, false);
-        assert!(found);
-        assert_eq!(t, 20);
+            // From tick 12, searching upward, should find 20
+            let (t, found) = next_initialized_tick_within_word(&env, 12, false);
+            assert!(found);
+            assert_eq!(t, 20);
+        });
     }
 
     #[test]
     fn multiple_ticks_same_word() {
-        let env = env_with_contract();
-        flip_tick(&env, 0);
-        flip_tick(&env, 64);
-        flip_tick(&env, 127);
+        let (env, addr) = env_with_contract();
+        env.as_contract(&addr, || {
+            flip_tick(&env, 0);
+            flip_tick(&env, 64);
+            flip_tick(&env, 127);
 
-        // From 0 searching up: should find 0
-        let (t, found) = next_initialized_tick_within_word(&env, 0, false);
-        assert!(found);
-        assert_eq!(t, 0);
+            let (t, found) = next_initialized_tick_within_word(&env, 0, false);
+            assert!(found);
+            assert_eq!(t, 0);
 
-        // From 1 searching up: should find 64
-        let (t, found) = next_initialized_tick_within_word(&env, 1, false);
-        assert!(found);
-        assert_eq!(t, 64);
+            let (t, found) = next_initialized_tick_within_word(&env, 1, false);
+            assert!(found);
+            assert_eq!(t, 64);
 
-        // From 127 searching down: should find 127
-        let (t, found) = next_initialized_tick_within_word(&env, 127, true);
-        assert!(found);
-        assert_eq!(t, 127);
+            let (t, found) = next_initialized_tick_within_word(&env, 127, true);
+            assert!(found);
+            assert_eq!(t, 127);
+        });
     }
 
     #[test]
     fn no_tick_in_direction_returns_false() {
-        let env = env_with_contract();
-        flip_tick(&env, 100);
+        let (env, addr) = env_with_contract();
+        env.as_contract(&addr, || {
+            flip_tick(&env, 100);
 
-        // Searching below 100 finds nothing (only 100 is set)
-        let (_, found) = next_initialized_tick_within_word(&env, 99, true);
-        assert!(!found);
+            let (_, found) = next_initialized_tick_within_word(&env, 99, true);
+            assert!(!found);
+        });
     }
 }

@@ -6,38 +6,87 @@
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 use amm::AmmPoolClient;
+use factory::FactoryClient;
+
+const MIN_TTL: u32 = 172_800;
+const BUMP_TO: u32 = 518_400;
+
+#[contracttype]
+pub enum DataKey {
+    Factory,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SwapOp {
+    pub pool: Address,
+    pub token_in: Address,
+    pub amount_in: i128,
+    pub min_out: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AddLiquidityOp {
+    pub pool: Address,
+    pub amount_a: i128,
+    pub amount_b: i128,
+    pub min_shares: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RemoveLiquidityOp {
+    pub pool: Address,
+    pub shares: i128,
+    pub min_a: i128,
+    pub min_b: i128,
+}
 
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum BatchOp {
     /// Swap `amount_in` of `token_in` on `pool` with `min_out` slippage guard.
-    Swap {
-        pool: Address,
-        token_in: Address,
-        amount_in: i128,
-        min_out: i128,
-    },
+    Swap(SwapOp),
     /// Add liquidity to `pool`.
-    AddLiquidity {
-        pool: Address,
-        amount_a: i128,
-        amount_b: i128,
-        min_shares: i128,
-    },
+    AddLiquidity(AddLiquidityOp),
     /// Remove liquidity from `pool`.
-    RemoveLiquidity {
-        pool: Address,
-        shares: i128,
-        min_a: i128,
-        min_b: i128,
-    },
+    RemoveLiquidity(RemoveLiquidityOp),
 }
+
+/// Result of a single [`BatchOp`], preserving the real output of each leg so
+/// callers chaining batch results can do downstream accounting.
+///
+/// `RemoveLiquidity` carries both token amounts: packing them into one `i128`
+/// would be lossy, and returning the shares burned (which the caller already
+/// knows) tells them nothing about the tokens actually received.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BatchOpResult {
+    /// Output amount received from the swap.
+    Swap(i128),
+    /// LP shares minted by adding liquidity.
+    AddLiquidity(i128),
+    /// Token amounts `(amount_a, amount_b)` returned by removing liquidity.
+    RemoveLiquidity(i128, i128),
+}
+
+const MAX_BATCH_OPS: u32 = 200;
 
 #[contract]
 pub struct BatchRouter;
 
 #[contractimpl]
 impl BatchRouter {
+    /// Initialize the router with the factory that tracks all deployed pools.
+    pub fn initialize(env: Env, factory: Address) {
+        assert!(
+            !env.storage().instance().has(&DataKey::Factory),
+            "already initialized"
+        );
+        env.storage().instance().set(&DataKey::Factory, &factory);
+    }
+
     /// Execute a sequence of AMM operations atomically.
     ///
     /// All operations share one `deadline` and a single `caller` authorization.
@@ -47,15 +96,23 @@ impl BatchRouter {
         caller: Address,
         ops: Vec<BatchOp>,
         deadline: u64,
-    ) -> Vec<i128> {
+    ) -> Vec<BatchOpResult> {
+        env.storage().instance().extend_ttl(MIN_TTL, BUMP_TO);
         caller.require_auth();
         assert!(!ops.is_empty(), "empty batch");
+        assert!(
+            ops.len() <= MAX_BATCH_OPS,
+            "batch exceeds MAX_BATCH_OPS ceiling"
+        );
         assert!(env.ledger().timestamp() <= deadline, "deadline expired");
+
+        let factory: Address = env.storage().instance().get(&DataKey::Factory).unwrap();
+        let factory_client = FactoryClient::new(&env, &factory);
 
         let mut results = Vec::new(&env);
         for i in 0..ops.len() {
             let op = ops.get(i).unwrap();
-            let result = Self::execute_op(&env, &caller, &op, deadline);
+            let result = Self::execute_op(&env, &caller, &op, deadline, &factory_client);
             results.push_back(result);
         }
 
@@ -74,42 +131,48 @@ impl BatchRouter {
         (ops_len, 1)
     }
 
-    fn execute_op(env: &Env, caller: &Address, op: &BatchOp, deadline: u64) -> i128 {
+    fn execute_op(
+        env: &Env,
+        caller: &Address,
+        op: &BatchOp,
+        deadline: u64,
+        factory_client: &FactoryClient,
+    ) -> BatchOpResult {
+        let pool = match op {
+            BatchOp::Swap(o) => &o.pool,
+            BatchOp::AddLiquidity(o) => &o.pool,
+            BatchOp::RemoveLiquidity(o) => &o.pool,
+        };
+        assert!(
+            factory_client.get_pool_tokens(pool).is_some(),
+            "unrecognized pool"
+        );
+
         match op {
-            BatchOp::Swap {
-                pool,
-                token_in,
-                amount_in,
-                min_out,
-            } => {
-                let out = AmmPoolClient::new(env, pool)
-                    .swap(caller, token_in, amount_in, min_out, &deadline, &None)
-                    .unwrap_or_else(|_| panic!("batch swap failed"));
-                out
+            BatchOp::Swap(op) => {
+                let amount_out = AmmPoolClient::new(env, &op.pool).swap(
+                    caller,
+                    &op.token_in,
+                    &op.amount_in,
+                    &op.min_out,
+                    &deadline,
+                );
+                BatchOpResult::Swap(amount_out)
             }
-            BatchOp::AddLiquidity {
-                pool,
-                amount_a,
-                amount_b,
-                min_shares,
-            } => {
-                let shares = AmmPoolClient::new(env, pool)
-                    .add_liquidity(caller, amount_a, amount_b, min_shares, &deadline)
-                    .unwrap_or_else(|_| panic!("batch add_liquidity failed"));
-                shares
+            BatchOp::AddLiquidity(op) => {
+                let shares = AmmPoolClient::new(env, &op.pool).add_liquidity(
+                    caller,
+                    &op.amount_a,
+                    &op.amount_b,
+                    &op.min_shares,
+                    &deadline,
+                );
+                BatchOpResult::AddLiquidity(shares)
             }
-            BatchOp::RemoveLiquidity {
-                pool,
-                shares,
-                min_a,
-                min_b,
-            } => {
-                let (a, b) = AmmPoolClient::new(env, pool)
-                    .remove_liquidity(caller, shares, min_a, min_b, &deadline)
-                    .unwrap_or_else(|_| panic!("batch remove_liquidity failed"));
-                // Pack both legs into one i128 result is lossy; return shares burned as marker.
-                let _ = (a, b);
-                *shares
+            BatchOp::RemoveLiquidity(op) => {
+                let (a, b) = AmmPoolClient::new(env, &op.pool)
+                    .remove_liquidity(caller, &op.shares, &op.min_a, &op.min_b, &deadline);
+                BatchOpResult::RemoveLiquidity(a, b)
             }
         }
     }
@@ -119,6 +182,7 @@ impl BatchRouter {
 mod tests {
     use super::*;
     use amm::AmmPool;
+    use factory::{Factory, FactoryClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         token::{StellarAssetClient, TokenClient as StellarTokenClient},
@@ -126,30 +190,18 @@ mod tests {
     };
     use token::{LpToken, LpTokenClient};
 
-    fn deploy_pool(env: &Env, token_a: &Address, token_b: &Address) -> Address {
-        let amm_addr = env.register_contract(None, AmmPool);
-        let lp_addr = env.register_contract(None, LpToken);
-        LpTokenClient::new(env, &lp_addr).initialize(
-            &amm_addr,
-            &String::from_str(env, "LP"),
-            &String::from_str(env, "LP"),
-            &7u32,
-        );
-        AmmPoolClient::new(env, &amm_addr)
-            .initialize(
-                &amm_addr,
-                token_a,
-                token_b,
-                &lp_addr,
-                &30_i128,
-                &amm_addr,
-                &0_i128,
-            )
-            .unwrap();
-        amm_addr
+    fn setup_env_and_factory(env: &Env) -> Address {
+        let admin = Address::generate(env);
+        env.budget().reset_unlimited();
+        let amm_wasm_hash = env.deployer().upload_contract_wasm(amm::WASM);
+        let lp_wasm_hash = env.deployer().upload_contract_wasm(token::WASM);
+        let factory_addr = env.register_contract(None, Factory);
+        let factory = FactoryClient::new(env, &factory_addr);
+        factory.initialize(&admin, &amm_wasm_hash, &lp_wasm_hash);
+        factory_addr
     }
 
-    fn setup_pool(env: &Env) -> (Address, Address, Address, Address) {
+    fn setup_pool(env: &Env, factory_addr: &Address) -> (Address, Address, Address, Address) {
         let admin = Address::generate(env);
         let ta = env
             .register_stellar_asset_contract_v2(admin.clone())
@@ -157,137 +209,202 @@ mod tests {
         let tb = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
-        let pool = deploy_pool(env, &ta, &tb);
+        
+        let factory = FactoryClient::new(env, factory_addr);
+        factory.create_pool(&admin, &ta, &tb, &2_i128, &None);
+        let pool = factory.get_pool(&ta, &tb).unwrap();
+        let lp = factory.get_lp_token(&pool).unwrap();
 
-        let lp = Address::generate(env);
-        StellarAssetClient::new(env, &ta).mint(&lp, &2_000_000_i128);
-        StellarAssetClient::new(env, &tb).mint(&lp, &2_000_000_i128);
+        let provider = Address::generate(env);
+        StellarAssetClient::new(env, &ta).mint(&provider, &2_000_000_i128);
+        StellarAssetClient::new(env, &tb).mint(&provider, &2_000_000_i128);
         AmmPoolClient::new(env, &pool).add_liquidity(
-            &lp,
+            &provider,
             &1_000_000_i128,
             &1_000_000_i128,
             &0_i128,
             &u64::MAX,
         );
 
-        (ta, tb, pool, lp)
+        (ta, tb, pool, provider)
     }
 
     #[test]
     fn test_batch_multiple_swaps() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
 
         let trader = Address::generate(&env);
         StellarAssetClient::new(&env, &ta).mint(&trader, &500_000_i128);
 
         let ops = vec![
             &env,
-            BatchOp::Swap {
+            BatchOp::Swap(SwapOp {
                 pool: pool.clone(),
                 token_in: ta.clone(),
                 amount_in: 10_000_i128,
                 min_out: 0_i128,
-            },
-            BatchOp::Swap {
+            }),
+            BatchOp::Swap(SwapOp {
                 pool: pool.clone(),
                 token_in: tb.clone(),
                 amount_in: 5_000_i128,
                 min_out: 0_i128,
-            },
-            BatchOp::Swap {
+            }),
+            BatchOp::Swap(SwapOp {
                 pool: pool.clone(),
                 token_in: ta.clone(),
                 amount_in: 3_000_i128,
                 min_out: 0_i128,
-            },
+            }),
         ];
 
+        let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+        
         let deadline = env.ledger().timestamp() + 1000;
-        let results = BatchRouterClient::new(&env, &env.register_contract(None, BatchRouter))
-            .execute_batch(&trader, &ops, &deadline);
+        let results = batch_client.execute_batch(&trader, &ops, &deadline);
 
         assert_eq!(results.len(), 3);
-        assert!(results.get(0).unwrap() > 0);
+        match results.get(0).unwrap() {
+            BatchOpResult::Swap(out) => assert!(out > 0),
+            other => panic!("expected swap result, got {other:?}"),
+        }
     }
 
     #[test]
     fn test_batch_swap_then_add_liquidity() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
 
         let trader = Address::generate(&env);
         StellarAssetClient::new(&env, &ta).mint(&trader, &200_000_i128);
         StellarAssetClient::new(&env, &tb).mint(&trader, &200_000_i128);
 
-        let swap_out = AmmPoolClient::new(&env, &pool).swap(
-            &trader,
-            &ta,
-            &50_000_i128,
-            &0_i128,
-            &u64::MAX,
-            &None,
-        );
+        let swap_out =
+            AmmPoolClient::new(&env, &pool).swap(&trader, &ta, &50_000_i128, &0_i128, &u64::MAX);
 
         let tb_bal = StellarTokenClient::new(&env, &tb).balance(&trader);
         let ops = vec![
             &env,
-            BatchOp::Swap {
+            BatchOp::Swap(SwapOp {
                 pool: pool.clone(),
                 token_in: ta.clone(),
                 amount_in: 10_000_i128,
                 min_out: 0_i128,
-            },
-            BatchOp::AddLiquidity {
+            }),
+            BatchOp::AddLiquidity(AddLiquidityOp {
                 pool: pool.clone(),
                 amount_a: 5_000_i128,
                 amount_b: tb_bal / 10,
                 min_shares: 0_i128,
-            },
+            }),
         ];
 
         let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+
         let deadline = env.ledger().timestamp() + 1000;
-        let results =
-            BatchRouterClient::new(&env, &batch_addr).execute_batch(&trader, &ops, &deadline);
+        let results = batch_client.execute_batch(&trader, &ops, &deadline);
 
         assert_eq!(results.len(), 2);
-        assert!(results.get(0).unwrap() > 0);
-        assert!(results.get(1).unwrap() > 0);
+        match results.get(0).unwrap() {
+            BatchOpResult::Swap(out) => assert!(out > 0),
+            other => panic!("expected swap result, got {other:?}"),
+        }
+        match results.get(1).unwrap() {
+            BatchOpResult::AddLiquidity(shares) => assert!(shares > 0),
+            other => panic!("expected add-liquidity result, got {other:?}"),
+        }
         let _ = swap_out;
     }
 
     #[test]
-    #[should_panic(expected = "batch swap failed")]
+    fn test_batch_remove_liquidity_returns_token_amounts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
+
+        // The LP adds liquidity directly so the batch can later remove it.
+        let lp = Address::generate(&env);
+        StellarAssetClient::new(&env, &ta).mint(&lp, &500_000_i128);
+        StellarAssetClient::new(&env, &tb).mint(&lp, &500_000_i128);
+        let shares = AmmPoolClient::new(&env, &pool).add_liquidity(
+            &lp,
+            &400_000_i128,
+            &400_000_i128,
+            &0_i128,
+            &u64::MAX,
+        );
+
+        let ops = vec![
+            &env,
+            BatchOp::RemoveLiquidity(RemoveLiquidityOp {
+                pool: pool.clone(),
+                shares,
+                min_a: 0_i128,
+                min_b: 0_i128,
+            }),
+        ];
+
+        let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+
+        let deadline = env.ledger().timestamp() + 1000;
+        let results = batch_client.execute_batch(&lp, &ops, &deadline);
+
+        assert_eq!(results.len(), 1);
+        // The actual token amounts received are reported, not the shares burned.
+        match results.get(0).unwrap() {
+            BatchOpResult::RemoveLiquidity(a, b) => {
+                assert!(a > 0, "expected token_a out, got {a}");
+                assert!(b > 0, "expected token_b out, got {b}");
+            }
+            other => panic!("expected remove-liquidity result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "contract call failed")]
     fn test_batch_atomic_revert_on_slippage() {
         let env = Env::default();
         env.mock_all_auths();
-        let (ta, tb, pool, _) = setup_pool(&env);
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, tb, pool, _) = setup_pool(&env, &factory_addr);
 
         let trader = Address::generate(&env);
         StellarAssetClient::new(&env, &ta).mint(&trader, &100_000_i128);
 
         let ops = vec![
             &env,
-            BatchOp::Swap {
+            BatchOp::Swap(SwapOp {
                 pool: pool.clone(),
                 token_in: ta.clone(),
                 amount_in: 1_000_i128,
                 min_out: 0_i128,
-            },
-            BatchOp::Swap {
+            }),
+            BatchOp::Swap(SwapOp {
                 pool,
                 token_in: tb,
                 amount_in: 1_000_i128,
                 min_out: 10_000_000_i128,
-            },
+            }),
         ];
 
         let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+
         let deadline = env.ledger().timestamp() + 1000;
-        BatchRouterClient::new(&env, &batch_addr).execute_batch(&trader, &ops, &deadline);
+        batch_client.execute_batch(&trader, &ops, &deadline);
     }
 
     #[test]
@@ -296,5 +413,33 @@ mod tests {
         let (individual, batch) = BatchRouter::estimate_call_savings(ops_len);
         let savings_bps = (individual - batch) * 10_000 / individual;
         assert!(savings_bps > 1_500, "expected >15% call overhead savings");
+    }
+
+    #[test]
+    #[should_panic(expected = "batch exceeds MAX_BATCH_OPS ceiling")]
+    fn test_batch_exceeds_max_ops() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let factory_addr = setup_env_and_factory(&env);
+        let (ta, _tb, pool, _) = setup_pool(&env, &factory_addr);
+
+        let trader = Address::generate(&env);
+
+        let mut ops = vec![&env];
+        for _ in 0..=MAX_BATCH_OPS {
+            ops.push_back(BatchOp::Swap(SwapOp {
+                pool: pool.clone(),
+                token_in: ta.clone(),
+                amount_in: 1_i128,
+                min_out: 0_i128,
+            }));
+        }
+
+        let deadline = env.ledger().timestamp() + 1000;
+        let batch_addr = env.register_contract(None, BatchRouter);
+        let batch_client = BatchRouterClient::new(&env, &batch_addr);
+        batch_client.initialize(&factory_addr);
+        
+        batch_client.execute_batch(&trader, &ops, &deadline);
     }
 }

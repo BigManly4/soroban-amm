@@ -296,6 +296,23 @@ export class ConcentratedLiquidityClient {
   }
 
   /**
+   * Parameters for `modify_position(provider, lower_tick, upper_tick,
+   * liquidity_delta, min_a, min_b, deadline)`.
+   * Returns `(amount_a, amount_b)`.
+   */
+  modifyPositionParams(
+    provider: string,
+    lowerTick: number,
+    upperTick: number,
+    liquidityDelta: bigint,
+    minA: bigint,
+    minB: bigint,
+    deadline: bigint
+  ): xdr.ScVal[] {
+    return [addr(provider), i32(lowerTick), i32(upperTick), i128(liquidityDelta), i128(minA), i128(minB), u64(deadline)];
+  }
+
+  /**
    * Parameters for `burn_position(provider, lower_tick, upper_tick)`.
    * Returns `(amount_a, amount_b)` of tokens sent back to the provider.
    */
