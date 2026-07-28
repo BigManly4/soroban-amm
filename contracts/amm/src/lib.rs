@@ -523,9 +523,20 @@ impl AmmPool {
             );
         }
 
-        // Zero out reserves
+        // Zero out reserves and total shares so the pool is in a clean empty
+        // state. Leaving TotalShares non-zero while reserves are 0 would cause
+        // add_liquidity to divide by zero (reserve_a == 0 in the proportional
+        // shares formula), permanently bricking deposits. Resetting
+        // MinLiquidityLocked allows the first re-deposit to re-establish the
+        // minimum-liquidity lock correctly. (Fixes #569)
         env.storage().instance().set(&DataKey::ReserveA, &0_i128);
         env.storage().instance().set(&DataKey::ReserveB, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLiquidityLocked, &false);
 
         // Emit event for audit trail
         soroban_amm_sdk::emit_versioned_event!(
@@ -1053,6 +1064,18 @@ impl AmmPool {
         }
         env.storage().instance().set(&DataKey::ReserveA, &0_i128);
         env.storage().instance().set(&DataKey::ReserveB, &0_i128);
+        // Zero TotalShares and reset MinLiquidityLocked so the pool is in a
+        // clean empty state after the drain. Leaving TotalShares non-zero
+        // while reserves are 0 causes add_liquidity to divide by zero in the
+        // proportional-shares formula, permanently bricking deposits.
+        // Resetting MinLiquidityLocked allows the first re-deposit to
+        // re-establish the minimum-liquidity lock correctly. (Fixes #569)
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &0_i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLiquidityLocked, &false);
         // Mark executed so re-execution returns AlreadyExecuted.
         env.storage()
             .instance()
