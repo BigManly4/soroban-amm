@@ -294,9 +294,11 @@ impl LpToken {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         let bal = Self::balance(env.clone(), from.clone());
+        let locked = Self::locked_balance(env.clone(), from.clone());
         assert!(
-            bal >= amount,
-            "insufficient balance: available={bal}, requested={amount}"
+            bal - locked >= amount,
+            "insufficient unlocked balance: available={}, requested={amount}",
+            bal - locked
         );
         env.storage()
             .persistent()
@@ -938,7 +940,6 @@ mod tests {
         assert_eq!(client.balance(&alice), 0);
         assert_eq!(client.balance(&bob), 1_000);
     }
-
     // ── Issue #556: set_locker must not orphan previously-locked governance votes ──
 
     #[test]
@@ -1114,6 +1115,33 @@ mod tests {
         assert!(client.try_unlock(&alice, &locker, &1_i128).is_err());
     }
 
+    #[test]
+    fn test_burn_blocked_by_lock() {
+        let ts = setup();
+        let client = LpTokenClient::new(&ts.env, &ts.contract_addr);
+        let alice = Address::generate(&ts.env);
+        let locker = Address::generate(&ts.env);
+
+        client.set_locker(&locker);
+        client.mint(&alice, &1_000_i128);
+        client.lock(&alice, &700_i128);
+        assert_eq!(client.locked_balance(&alice), 700);
+
+        // Burning more than the unlocked (300) portion must fail, even though
+        // the gross balance (1000) would otherwise cover it.
+        assert!(client.try_burn(&alice, &400_i128).is_err());
+        assert_eq!(client.balance(&alice), 1_000);
+
+        // Burning up to the unlocked amount still works.
+        client.burn(&alice, &300_i128);
+        assert_eq!(client.balance(&alice), 700);
+        assert_eq!(client.locked_balance(&alice), 700);
+
+        client.unlock(&alice, &locker, &700_i128);
+        client.burn(&alice, &700_i128);
+        assert_eq!(client.balance(&alice), 0);
+    }
+
     // ── migration ────────────────────────────────────────────────────────────
 
     #[test]
@@ -1229,7 +1257,7 @@ mod tests {
         let new_alice = Address::generate(&env);
         let new_locker = Address::generate(&env);
         env_persist_lock_unlocked_total(&ts, &new_alice, 50);
-        // With mock_all_auths, this still passes \u2014 semantics rely on auth-context.
+        // With mock_all_auths, this still passes — semantics rely on auth-context.
         // This test therefore simply confirms migrate works for fresh holders as
         // documented; the require_auth gate is enforced in production.
         client.migrate_legacy_lock(&new_alice, &new_locker, &50_i128);
