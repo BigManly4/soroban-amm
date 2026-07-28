@@ -38,6 +38,8 @@ pub enum DataKey {
     /// binary-search for the most recent snapshot at or before an arbitrary
     /// `then_ts` instead of requiring an exact-timestamp hit (issue #469).
     SnapshotTimestamps(Address),
+    /// Running liquidity-cumulative state for a CL pool (see `save_cl_snapshot`).
+    ClAccumulator(Address),
 }
 
 #[contracttype]
@@ -59,6 +61,25 @@ pub struct TrackedPool {
 pub struct LiquiditySnapshot {
     pub cum_liquidity: i128,
     pub pool_ts: u64,
+}
+
+/// Running integral of a CL pool's active liquidity over ledger time.
+///
+/// Concentrated-liquidity pools only expose the *instantaneous* active
+/// liquidity, so — unlike the AMM path — there is no pool-side cumulative to
+/// difference. This contract builds one itself: on each keeper snapshot it adds
+/// `last_active * elapsed` to `cum_liquidity`, turning a series of instantaneous
+/// readings into a proper time-weighted accumulator that `get_cl_twal` can
+/// difference to recover an average liquidity *level* (issue #462).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClLiquidityAccumulator {
+    /// Integral of active liquidity over ledger time (liquidity-seconds).
+    pub cum_liquidity: i128,
+    /// Ledger timestamp at which the accumulator was last updated.
+    pub last_ts: u64,
+    /// Active liquidity recorded at `last_ts`, held constant until the next update.
+    pub last_active: i128,
 }
 
 #[contract]
@@ -273,14 +294,50 @@ impl TwalConsumer {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Save a CL pool snapshot, accumulating the integral of active liquidity.
+    ///
+    /// A CL pool only exposes its *instantaneous* active liquidity, so each call
+    /// advances a running accumulator by `last_active * elapsed` (the liquidity
+    /// recorded at the previous snapshot, held constant over the interval since).
+    /// The resulting cumulative — not the raw instantaneous reading — is stored
+    /// in the snapshot, so `get_cl_twal` can difference two snapshots to recover
+    /// an average liquidity *level* rather than a rate of change (issue #462).
     pub fn save_cl_snapshot(env: Env, pool: Address) -> Result<(), TwalError> {
         Self::require_keeper(&env)?;
         let active = ClPoolLiquidityClient::new(&env, &pool).active_liquidity();
-        let (_tick_cum, pool_ts) = ClPoolLiquidityClient::new(&env, &pool).get_tick_cumulative();
         let ledger_ts = env.ledger().timestamp();
+
+        let acc_key = DataKey::ClAccumulator(pool.clone());
+        let cum = match env
+            .storage()
+            .persistent()
+            .get::<_, ClLiquidityAccumulator>(&acc_key)
+        {
+            Some(prev) => {
+                let elapsed = ledger_ts.saturating_sub(prev.last_ts) as i128;
+                prev.cum_liquidity + prev.last_active * elapsed
+            }
+            // First snapshot for this pool: cumulative starts at zero.
+            None => 0,
+        };
+
+        let accumulator = ClLiquidityAccumulator {
+            cum_liquidity: cum,
+            last_ts: ledger_ts,
+            last_active: active,
+        };
+        env.storage().persistent().set(&acc_key, &accumulator);
+        env.storage().persistent().extend_ttl(
+            &acc_key,
+            Self::SNAPSHOT_TTL_LEDGERS / 2,
+            Self::SNAPSHOT_TTL_LEDGERS,
+        );
+
+        // Store the running cumulative (and the ledger time it corresponds to)
+        // so a later query can difference two points of the integral.
         let snapshot = LiquiditySnapshot {
-            cum_liquidity: active,
-            pool_ts,
+            cum_liquidity: cum,
+            pool_ts: ledger_ts,
         };
         let key = DataKey::LiquiditySnapshot(pool.clone(), ledger_ts);
         env.storage().persistent().set(&key, &snapshot);
@@ -307,13 +364,18 @@ impl TwalConsumer {
             .publish((Symbol::new(&env, "snapshot_deleted"),), (pool, ledger_ts));
         Ok(())
     }
-    /// Returns the time‑weighted average active liquidity for a CL pool over `window_seconds`.
+    /// Returns the time-weighted average active liquidity for a CL pool over
+    /// `window_seconds`.
+    ///
+    /// Differences the liquidity-cumulative of the floor snapshot (the most
+    /// recent one at or before `now - window`) against the accumulator
+    /// extrapolated to the current ledger time, then divides by the elapsed
+    /// span. A pool whose active liquidity is constant at `L` correctly reports
+    /// `L`; the previous implementation differenced two *instantaneous* readings
+    /// and so reported a rate of change (0 for constant liquidity) with the
+    /// wrong units (issue #462).
     pub fn get_cl_twal(env: Env, pool: Address, window_seconds: u64) -> i128 {
         assert!(window_seconds > 0, "window_seconds must be > 0");
-
-        // Current active liquidity and pool timestamp
-        let active = ClPoolLiquidityClient::new(&env, &pool).active_liquidity();
-        let (_, pool_ts_now) = ClPoolLiquidityClient::new(&env, &pool).get_tick_cumulative();
 
         let ledger_ts_now = env.ledger().timestamp();
         assert!(
@@ -327,13 +389,23 @@ impl TwalConsumer {
         let snapshot: LiquiditySnapshot = env
             .storage()
             .persistent()
-            .get(&DataKey::LiquiditySnapshot(pool, floor_ts))
+            .get(&DataKey::LiquiditySnapshot(pool.clone(), floor_ts))
             .unwrap_or_else(|| panic!("missing liquidity snapshot at {floor_ts}"));
 
-        let delta = (active as u128).wrapping_sub(snapshot.cum_liquidity as u128) as i128;
-        let elapsed = (pool_ts_now - snapshot.pool_ts) as i128;
+        let accumulator: ClLiquidityAccumulator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ClAccumulator(pool))
+            .unwrap_or_else(|| panic!("missing CL accumulator; call save_cl_snapshot first"));
+
+        // Extrapolate the cumulative to now using the last recorded active
+        // liquidity, mirroring how the AMM accumulator advances between checkpoints.
+        let elapsed_since_update = ledger_ts_now.saturating_sub(accumulator.last_ts) as i128;
+        let cum_now = accumulator.cum_liquidity + accumulator.last_active * elapsed_since_update;
+
+        let elapsed = (ledger_ts_now - snapshot.pool_ts) as i128;
         assert!(elapsed > 0, "window too small (pool time did not advance)");
-        delta / elapsed
+        (cum_now - snapshot.cum_liquidity) / elapsed
     }
 }
 
@@ -632,5 +704,83 @@ mod tests {
         consumer.initialize(&keeper);
 
         assert!(consumer.try_delete_snapshot(&pool, &10_000_u64).is_err());
+    }
+
+    // Minimal CL pool stand-in exposing a settable instantaneous active
+    // liquidity, matching the `ClPoolLiquidityOracle::active_liquidity` method
+    // the consumer reads.
+    #[contract]
+    pub struct MockClPool;
+
+    #[contractimpl]
+    impl MockClPool {
+        pub fn set_liquidity(env: Env, value: i128) {
+            env.storage()
+                .instance()
+                .set(&soroban_sdk::symbol_short!("liq"), &value);
+        }
+
+        pub fn active_liquidity(env: Env) -> i128 {
+            env.storage()
+                .instance()
+                .get(&soroban_sdk::symbol_short!("liq"))
+                .unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn test_cl_twal_constant_liquidity_reports_level() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(10_000);
+
+        let keeper = Address::generate(&env);
+        let pool_addr = env.register_contract(None, MockClPool);
+        let pool = MockClPoolClient::new(&env, &pool_addr);
+        let consumer_addr = env.register_contract(None, TwalConsumer);
+        let consumer = TwalConsumerClient::new(&env, &consumer_addr);
+        consumer.initialize(&keeper);
+
+        // Active liquidity is constant at 5_000 across the whole window.
+        pool.set_liquidity(&5_000_i128);
+        consumer.save_cl_snapshot(&pool_addr); // baseline accumulator at t=10_000
+
+        env.ledger().with_mut(|l| l.timestamp = 10_600);
+        consumer.save_cl_snapshot(&pool_addr); // accumulator advances by 5_000*600
+
+        env.ledger().with_mut(|l| l.timestamp = 11_200);
+        let twal = consumer.get_cl_twal(&pool_addr, &600);
+
+        // Constant liquidity must report its level, not a rate of change (0).
+        assert_eq!(twal, 5_000);
+    }
+
+    #[test]
+    fn test_cl_twal_is_time_weighted_average_of_levels() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(10_000);
+
+        let keeper = Address::generate(&env);
+        let pool_addr = env.register_contract(None, MockClPool);
+        let pool = MockClPoolClient::new(&env, &pool_addr);
+        let consumer_addr = env.register_contract(None, TwalConsumer);
+        let consumer = TwalConsumerClient::new(&env, &consumer_addr);
+        consumer.initialize(&keeper);
+
+        // 1_000 for the first 300s, then 3_000 for the next 300s.
+        pool.set_liquidity(&1_000_i128);
+        consumer.save_cl_snapshot(&pool_addr);
+
+        env.ledger().with_mut(|l| l.timestamp = 10_300);
+        pool.set_liquidity(&3_000_i128);
+        consumer.save_cl_snapshot(&pool_addr);
+
+        env.ledger().with_mut(|l| l.timestamp = 10_600);
+        consumer.save_cl_snapshot(&pool_addr);
+
+        // Window covers both segments: (1_000*300 + 3_000*300) / 600 = 2_000.
+        let twal = consumer.get_cl_twal(&pool_addr, &600);
+        assert_eq!(twal, 2_000);
     }
 }
