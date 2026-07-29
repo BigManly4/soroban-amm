@@ -2669,16 +2669,28 @@ impl AmmPool {
         } else {
             0
         };
+        // Issue #502: LP rebate — fraction of protocol fee returned to LP reserves.
+        let lp_rebate_bps: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LpRebateBps)
+            .unwrap_or(0);
+        let lp_rebate = if protocol_fee > 0 && lp_rebate_bps > 0 {
+            protocol_fee * lp_rebate_bps / 10_000
+        } else {
+            0
+        };
+        let net_protocol_fee = protocol_fee - lp_rebate;
 
         if token_in == token_a {
             env.storage().instance().set(
                 &DataKey::ReserveA,
-                &(reserve_in + actual_received - protocol_fee),
+                &(reserve_in + actual_received - net_protocol_fee),
             );
             env.storage()
                 .instance()
                 .set(&DataKey::ReserveB, &(reserve_out - amount_out));
-            if protocol_fee > 0 {
+            if net_protocol_fee > 0 {
                 let accrued: i128 = env
                     .storage()
                     .instance()
@@ -2686,17 +2698,17 @@ impl AmmPool {
                     .unwrap_or(0);
                 env.storage()
                     .instance()
-                    .set(&DataKey::AccruedFeeA, &(accrued + protocol_fee));
+                    .set(&DataKey::AccruedFeeA, &(accrued + net_protocol_fee));
             }
         } else {
             env.storage().instance().set(
                 &DataKey::ReserveB,
-                &(reserve_in + actual_received - protocol_fee),
+                &(reserve_in + actual_received - net_protocol_fee),
             );
             env.storage()
                 .instance()
                 .set(&DataKey::ReserveA, &(reserve_out - amount_out));
-            if protocol_fee > 0 {
+            if net_protocol_fee > 0 {
                 let accrued: i128 = env
                     .storage()
                     .instance()
@@ -2704,7 +2716,7 @@ impl AmmPool {
                     .unwrap_or(0);
                 env.storage()
                     .instance()
-                    .set(&DataKey::AccruedFeeB, &(accrued + protocol_fee));
+                    .set(&DataKey::AccruedFeeB, &(accrued + net_protocol_fee));
             }
         }
 
