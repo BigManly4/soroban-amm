@@ -695,6 +695,49 @@ fn test_fee_accrues_to_reserves() {
     assert!(info.reserve_a * info.reserve_b > 1_000_000 * 1_000_000);
 }
 
+#[test]
+fn test_swap_fot_applies_lp_rebate() {
+    let ts = setup_pool(30);
+    let env = &ts.env;
+    let amm = AmmPoolClient::new(env, &ts.amm_addr);
+    let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+    let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+    let provider = Address::generate(env);
+    ta_sac.mint(&provider, &1_000_000_i128);
+    tb_sac.mint(&provider, &1_000_000_i128);
+    AddLiquidity::new(&amm, &provider, 1_000_000, 1_000_000).execute();
+
+    let admin = ts.admin.clone();
+    let fee_recipient = Address::generate(env);
+    amm.set_protocol_fee(&admin, &fee_recipient, &10_i128);
+    amm.set_lp_rebate(&admin, &5_000_i128).unwrap();
+
+    let trader = Address::generate(env);
+    let amount_in = 100_000_i128;
+    ta_sac.mint(&trader, &amount_in);
+
+    let (_, actual_received) = amm
+        .swap_fot(
+            &trader,
+            &ts.ta_addr,
+            &amount_in,
+            &0_i128,
+            &0_i128,
+            &u64::MAX,
+            &Option::<Address>::None,
+        )
+        .unwrap();
+
+    assert_eq!(actual_received, amount_in);
+
+    let info = amm.get_info();
+    assert_eq!(info.reserve_a, 1_000_000 + amount_in - 50_i128);
+    let (accrued_a, accrued_b) = amm.get_accrued_fees();
+    assert_eq!(accrued_a, 50_i128);
+    assert_eq!(accrued_b, 0_i128);
+}
+
 // ── Issue #98: swap_exact_out ─────────────────────────────────────────────────
 
 #[test]
