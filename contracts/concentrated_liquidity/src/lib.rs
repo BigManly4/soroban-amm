@@ -58,6 +58,7 @@ pub enum ClError {
     NftNotConfigured = 19,        // no position-NFT contract is wired into the pool
     NotNftOwner = 20,             // caller does not currently own the position NFT
     NftContractChangeBlocked = 21, // changing NFT contract while positions are tokenized would orphan indices
+    RangeOrderExists = 22, // a range order is already active on this range — withdraw it before placing a new one
 }
 
 /// Status of a range order (issue #295).
@@ -1214,8 +1215,17 @@ impl ConcentratedLiquidity {
     /// The position is tagged internally so [`check_range_order_filled`] can
     /// report its status without requiring an off-chain keeper.
     ///
+    /// Only one range order may be active per `(provider, lower_tick,
+    /// upper_tick)`: re-placing while an earlier order's liquidity is still in
+    /// the position is rejected with [`ClError::RangeOrderExists`]. The tag is
+    /// released when the position is fully withdrawn (see
+    /// [`burn_position_core`](Self::burn_position_core)), so the same range can
+    /// be reused for a fresh order afterwards.
+    ///
     /// # Errors
     /// - [`ClError::RangeOrderInRange`] – the range straddles the current tick.
+    /// - [`ClError::RangeOrderExists`] – a previous order on this range has not
+    ///   been withdrawn yet.
     /// - All the usual [`ClError`] variants from [`mint_position_single_token`].
     #[allow(clippy::too_many_arguments)]
     pub fn place_range_order(
@@ -1239,6 +1249,25 @@ impl ConcentratedLiquidity {
         let is_below = current_tick >= upper_tick;
         if !is_above && !is_below {
             return Err(ClError::RangeOrderInRange);
+        }
+
+        // Reject re-placing while a previous order on this exact range still
+        // has liquidity in the position. `mint_position_single_token` merges
+        // liquidity into the shared `Position`, so overwriting the direction
+        // tag would silently corrupt the fill status of the earlier tranche
+        // (issue #595). The provider must withdraw (burn) the old order first.
+        let range_order_key = DataKey::RangeOrder(provider.clone(), lower_tick, upper_tick);
+        if env.storage().instance().has(&range_order_key) {
+            let pos: Option<Position> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Position(provider.clone(), lower_tick, upper_tick));
+            if pos.map(|p| p.liquidity > 0).unwrap_or(false) {
+                return Err(ClError::RangeOrderExists);
+            }
+            // Stale tag from before the burn cleanup (legacy state): the
+            // position is already closed, so just release it.
+            env.storage().instance().remove(&range_order_key);
         }
 
         // Delegate to the existing single-token deposit logic.
@@ -1467,6 +1496,13 @@ impl ConcentratedLiquidity {
             }
             env.storage().persistent().set(&list_key, &new_list);
             Self::bump_position(env, &list_key);
+
+            // Fully closed range order: release its direction tag so the
+            // provider can place a fresh order on the same range (issue #595).
+            let range_order_key = DataKey::RangeOrder(provider.clone(), lower_tick, upper_tick);
+            if env.storage().instance().has(&range_order_key) {
+                env.storage().instance().remove(&range_order_key);
+            }
         }
 
         let fg_a: i128 = env
@@ -6576,5 +6612,155 @@ mod test_range_order_fill_status {
             client.check_range_order_filled(&provider, &100_i32, &200_i32),
             RangeOrderStatus::Filled
         );
+    }
+
+    // ── Issue #595: re-placing on a range with an unwithdrawn order ──────────
+
+    #[test]
+    fn active_range_order_cannot_be_replaced() {
+        let env = Env::default();
+        let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        // A second order on the identical range must be rejected while the
+        // first tranche's liquidity is still in the position.
+        let result = client.try_place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+        assert_eq!(result, Err(Ok(ClError::RangeOrderExists)));
+
+        // The original order's direction tag must be untouched.
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Pending
+        );
+
+        // A different (unused) range is still available.
+        client.place_range_order(
+            &provider,
+            &300_i32,
+            &400_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+    }
+
+    #[test]
+    fn filled_range_order_blocks_replacement_until_withdrawn() {
+        let env = Env::default();
+        let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
+        let cl_addr = client.address.clone();
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        // The order fills: price crosses above upper_tick.
+        set_current_tick(&env, &cl_addr, 200);
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Filled
+        );
+
+        // Now the same range would be a *below*-range order — the exact
+        // flag-flip scenario from the issue. It must be rejected until the
+        // filled tranche is withdrawn.
+        let result = client.try_place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &_token_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+        assert_eq!(result, Err(Ok(ClError::RangeOrderExists)));
+
+        // The fill status must not have been corrupted by the failed attempt.
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Filled
+        );
+
+        // After withdrawing the filled order, the range can be reused with the
+        // *new* direction and the fill status resets to Pending.
+        let pos = client.get_position(&provider, &100_i32, &200_i32);
+        client.burn_position(&provider, &100_i32, &200_i32, &pos.liquidity);
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &_token_b,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Pending
+        );
+
+        // The new below-range order is filled once price falls below lower_tick.
+        set_current_tick(&env, &cl_addr, 99);
+        assert_eq!(
+            client.check_range_order_filled(&provider, &100_i32, &200_i32),
+            RangeOrderStatus::Filled
+        );
+    }
+
+    #[test]
+    fn partial_burn_keeps_range_order_active() {
+        let env = Env::default();
+        let (provider, token_a, _token_b, client) = setup_pool(&env, 0);
+
+        client.place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+
+        let pos = client.get_position(&provider, &100_i32, &200_i32);
+        let half = (pos.liquidity / 2).max(1);
+        client.burn_position(&provider, &100_i32, &200_i32, &half);
+
+        // A partially withdrawn order is still active: re-placing stays blocked.
+        let result = client.try_place_range_order(
+            &provider,
+            &100_i32,
+            &200_i32,
+            &token_a,
+            &10_000_i128,
+            &1_i128,
+            &u64::MAX,
+        );
+        assert_eq!(result, Err(Ok(ClError::RangeOrderExists)));
     }
 }
