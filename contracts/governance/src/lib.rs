@@ -332,7 +332,8 @@ pub trait LpTokenInterface {
     fn balance_at(env: Env, id: Address, ledger: u32) -> i128;
     fn total_supply(env: Env) -> i128;
     fn lock(env: Env, holder: Address, amount: i128);
-    fn unlock(env: Env, holder: Address, amount: i128);
+    /// `locker` is the contract that originally locked the tokens (issue #556 fix).
+    fn unlock(env: Env, holder: Address, locker: Address, amount: i128);
 }
 
 // ── AMM client ────────────────────────────────────────────────────────────────
@@ -1064,7 +1065,10 @@ impl Governance {
         }
 
         let lp_token: Address = env.storage().instance().get(&DataKey::LpToken).unwrap();
-        LpTokenClient::new(&env, &lp_token).unlock(&voter, &locked);
+        // Issue #556: pass `self_addr` as the locker so the LP token authorises this
+        // contract, even after Admin has rotated `set_locker` to a different contract.
+        let self_addr = env.current_contract_address();
+        LpTokenClient::new(&env, &lp_token).unlock(&voter, &self_addr, &locked);
         env.storage().persistent().remove(&lock_key);
 
         soroban_amm_sdk::emit_versioned_event!(
