@@ -31,10 +31,8 @@ dependencies = [
 name = "amm-fuzz"
 version = "0.1.0"
 dependencies = [
- "amm",
  "proptest",
  "soroban-sdk",
- "token",
 ]
 
 [[package]]

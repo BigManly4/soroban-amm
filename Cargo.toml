@@ -18,7 +18,28 @@ members = [
   "contracts/governance",
   "contracts/staking",
   "contracts/integration-tests",
-]  
+  "contracts/oracle_aggregator",
+  "contracts/cl_position_nft",
+  "contracts/v2_to_v3_migration",
+  "contracts/pol_vesting",
+  "benches",
+]
+default-members = [
+  "contracts/amm",
+  "contracts/amm-sdk",
+  "contracts/concentrated_liquidity",
+  "contracts/factory",
+  "contracts/token",
+  "contracts/reserve_manager",
+  "contracts/twap_consumer",
+  "contracts/twal_consumer",
+  "contracts/incentive_campaigns",
+  "contracts/governance",
+  "contracts/staking",
+  "contracts/oracle_aggregator",
+  "contracts/v2_to_v3_migration",
+  "contracts/pol_vesting",
+]
 
 [workspace.dependencies]
 soroban-sdk = { version = "21.7.7" }
