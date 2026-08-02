@@ -1135,8 +1135,11 @@ impl AmmPool {
 
         let agg =
             OracleAggregatorClient::new(env, &oracle_addr).get_price_safe(token_in, token_out);
-        if amount_in <= 0 || agg.confidence == 0 || agg.price <= 0 {
+        if amount_in <= 0 {
             return Ok(());
+        }
+        if agg.confidence == 0 || agg.price <= 0 {
+            return Err(AmmError::OracleDeviationExceeded);
         }
 
         let spot_price = amount_out * 1_000_000 / amount_in;
