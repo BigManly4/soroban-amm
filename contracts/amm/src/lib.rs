@@ -2477,6 +2477,16 @@ impl AmmPool {
         (reserve_in * amount_out * 10_000) / ((reserve_out - amount_out) * (10_000 - fee_bps)) + 1
     }
 
+    /// Return the current swap fee in basis points.
+    ///
+    /// This is a read-only view function; it makes no state changes.
+    ///
+    /// # Returns
+    /// The pool's `fee_bps` as an `i128`. For the full pool state, see [`AmmPool::get_info`].
+    pub fn get_fee_info(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey::FeeBps).unwrap()
+    }
+
     /// Return full pool state.
     /// Return a snapshot of the full pool state.
     ///
@@ -2492,10 +2502,6 @@ impl AmmPool {
     /// - `admin` — the pool administrator.
     /// - `fee_recipient` — recipient of accrued protocol fees.
     /// - `protocol_fee_bps` — protocol fee in basis points (subset of `fee_bps`).
-    pub fn get_fee_info(env: Env) -> i128 {
-        env.storage().instance().get(&DataKey::FeeBps).unwrap()
-    }
-
     pub fn get_info(env: Env) -> PoolInfo {
         PoolInfo {
             token_a: env.storage().instance().get(&DataKey::TokenA).unwrap(),
