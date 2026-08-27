@@ -1,0 +1,39 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule: { interval: weekly }
+    groups: { patch-updates: { update-types: [patch] } }
+  - package-ecosystem: npm
+    directory: "/packages/sdk"
+    schedule: { interval: weekly }
+    groups: { patch-updates: { update-types: [patch] } }
+  - package-ecosystem: npm
+    directory: "/packages/ui-components"
+    schedule: { interval: weekly }
+    groups: { patch-updates: { update-types: [patch] } }
+  - package-ecosystem: npm
+    directory: "/packages/ts-advanced-client"
+    schedule: { interval: weekly }
+    groups: { patch-updates: { update-types: [patch] } }
+  - package-ecosystem: npm
+    directory: "/services/graphql-api"
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: "/services/webhook-streamer"
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: "/services/health-dashboard"
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: "/examples/client"
+    schedule: { interval: weekly }
+  - package-ecosystem: gomod
+    directory: "/packages/go-sdk"
+    schedule: { interval: weekly }
+  - package-ecosystem: pip
+    directory: "/examples/python"
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }
