@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
+import argparse
 
-import json
 import os
 import sys
 from typing import Any, Dict
 
 from stellar_sdk import Keypair, Network, scval
-from stellar_sdk.address import Address
 from stellar_sdk.contract import ContractClient
+from common import format_json, required_env, simulate_contract_call, submit_contract_call
 
 # Prices returned by the TWAP consumer use the same fixed-point scale as the
 # AMM spot price. See the "Use the TWAP Oracle" section of the README.
@@ -15,6 +15,7 @@ PRICE_SCALE = 1_000_000
 
 
 def main() -> int:
+    argparse.ArgumentParser(description="Soroban AMM integration example").parse_args()
     rpc_url = os.getenv("STELLAR_RPC_URL", "https://soroban-testnet.stellar.org")
     network_passphrase = os.getenv(
         "STELLAR_NETWORK_PASSPHRASE",
@@ -162,65 +163,6 @@ def validate_price_against_twap(
 
 def get_tracked_pools(client: ContractClient) -> Any:
     return simulate_contract_call(client, "get_tracked_pools")
-
-
-def simulate_contract_call(
-    client: ContractClient,
-    method: str,
-    *parameters: Any,
-) -> Any:
-    return client.invoke(
-        method,
-        parameters=list(parameters),
-        parse_result_xdr_fn=scval.to_native,
-    ).result()
-
-
-def submit_contract_call(
-    client: ContractClient,
-    source_keypair: Keypair,
-    method: str,
-    *parameters: Any,
-) -> Any:
-    assembled = client.invoke(
-        method,
-        parameters=list(parameters),
-        source=source_keypair.public_key,
-        signer=source_keypair,
-        parse_result_xdr_fn=scval.to_native,
-    )
-    assembled.sign_auth_entries(source_keypair)
-    return assembled.sign_and_submit()
-
-
-def required_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise ValueError(f"Missing required environment variable: {name}")
-    return value
-
-
-def format_json(value: Any) -> str:
-    return json.dumps(normalize_for_json(value), indent=2)
-
-
-def normalize_for_json(value: Any) -> Any:
-    if isinstance(value, Address):
-        return value.address
-
-    if isinstance(value, bytes):
-        return value.hex()
-
-    if isinstance(value, list):
-        return [normalize_for_json(entry) for entry in value]
-
-    if isinstance(value, dict):
-        return {
-            str(normalize_for_json(key)): normalize_for_json(entry_value)
-            for key, entry_value in value.items()
-        }
-
-    return value
 
 
 if __name__ == "__main__":

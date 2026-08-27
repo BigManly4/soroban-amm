@@ -1,4 +1,4 @@
-import { Account, Address, Contract, Keypair, SorobanRpc, TransactionBuilder, scValToNative, xdr } from '@stellar/stellar-sdk';
+import { Account, Address, Contract, Keypair, TransactionBuilder, scValToNative, rpc, xdr } from '@stellar/stellar-sdk';
 
 /**
  * Typed Client for the Soroban AMM router contract.
@@ -74,7 +74,7 @@ export class RouterClient {
   private rpcUrl: string;
   private networkPassphrase: string;
   private contractId: string;
-  private server: SorobanRpc.Server;
+  private server: rpc.Server;
   private contract: Contract;
   private static dummyAccount = new Account(
     'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWWF',
@@ -85,7 +85,7 @@ export class RouterClient {
     this.rpcUrl = options.rpcUrl;
     this.networkPassphrase = options.networkPassphrase;
     this.contractId = options.contractId;
-    this.server = new SorobanRpc.Server(options.rpcUrl, { allowHttp: true });
+    this.server = new rpc.Server(options.rpcUrl, { allowHttp: true });
     this.contract = new Contract(options.contractId);
   }
 
@@ -113,7 +113,7 @@ export class RouterClient {
    * `srcInput` contains `deadlineSeconds` optionally, defaulting to ledger time + 300.
    * See contracts/router/src/lib.rs:16 "swap_exact_in"
    */
-  async swapExactIn(input: SwapExactInInput, source: Keypair, fee?: string): Promise<SorobanRpc.SendTransactionResponse> {
+  async swapExactIn(input: SwapExactInInput, source: Keypair, fee?: string): Promise<rpc.Api.SendTransactionResponse> {
     const deadline = await this.resolveDeadline(input.deadlineSeconds);
     return this.submitContractCall(
       'swap_exact_in',
@@ -134,7 +134,7 @@ export class RouterClient {
    * `srcInput` contains `deadlineSeconds` optionally, defaulting to ledger time + 300.
    * See contracts/router/src/lib.rs:22 "swap_exact_out"
    */
-  async swapExactOut(input: SwapExactOutInput, source: Keypair, fee?: string): Promise<SorobanRpc.SendTransactionResponse> {
+  async swapExactOut(input: SwapExactOutInput, source: Keypair, fee?: string): Promise<rpc.Api.SendTransactionResponse> {
     const deadline = await this.resolveDeadline(input.deadlineSeconds);
     return this.submitContractCall(
       'swap_exact_out',
@@ -168,12 +168,12 @@ export class RouterClient {
     return scValToNative(retval as xdr.ScVal);
   }
 
-  private async {private submitContractCall(
+  private async submitContractCall(
     method: string,
     params: xdr.ScVal[],
     source: Keypair,
     fee?: string
-  ): Promise<SorobanRpc.SendTransactionResponse> {
+  ): Promise<rpc.Api.SendTransactionResponse> {
     if (!source) throw new Error('Source account required');
     const publicKey = source.publicKey();
     const account = await this.server.getAccount(publicKey);
@@ -204,8 +204,9 @@ export class RouterClient {
     if (deadlineSeconds !== undefined) {
       return BigInt(deadlineSeconds);
     }
-    const latest = await this.server.getLatestLedger();
-    return BigInt(latest.timestamp) + 300n;
+    await this.server.getLatestLedger();
+    // SDK v13 exposes ledger sequence but not close time; Soroban deadlines use Unix seconds.
+    return BigInt(Math.floor(Date.now() / 1000)) + 300n;
   }
 
   private decodeError(error: unknown): Error {

@@ -125,3 +125,28 @@ export MAX_DEVIATION_BPS=500 # Optional, allowed spot/TWAP deviation (defaults t
 ```sh
 python twap_client.py
 ```
+
+## Shared helpers, errors, and development checks
+
+All examples import configuration, ScVal conversion, JSON formatting, and RPC wrappers from `common.py`. Missing configuration raises `ConfigError`; failed simulation or submission raises `InvocationError` with a readable contract-method message and a link to `docs/error-codes.md`. The examples keep all process exit behavior inside their `__main__` guards, so helpers are safe to import in tests.
+
+The examples target **Soroban Testnet** by default. Override `STELLAR_RPC_URL` and `STELLAR_NETWORK_PASSPHRASE` when using another network. Every script accepts the shared settings `STELLAR_RPC_URL` and `STELLAR_NETWORK_PASSPHRASE`; the contract-specific variables are listed in each section above.
+
+Install exact runtime dependencies with:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Install development dependencies and run the offline helper suite with:
+
+```sh
+python -m pip install -r requirements-dev.txt
+python -m pytest examples/python
+python -m mypy examples/python
+python -m ruff check examples/python
+```
+
+Each script can be inspected without credentials using `python examples/python/<script>.py --help` once the command-line options are added by the corresponding example update; a complete configured run is, for example, `AMM_CONTRACT_ID=... SOURCE_SECRET=... TOKEN_IN_CONTRACT_ID=... python examples/python/client.py`.
