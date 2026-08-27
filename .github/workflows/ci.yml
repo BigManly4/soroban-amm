@@ -45,6 +45,9 @@ jobs:
         run: cargo fmt -p factory -- --check
       - name: Check docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p factory
+      - name: Check error docs sync
+        run: make check-docs
+
       - name: Security audit
         uses: rustsec/audit-check@v2
         with:

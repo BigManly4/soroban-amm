@@ -1,5 +1,16 @@
 # Error codes
 
+
+This document provides a complete reference for every error code emitted by the
+Soroban AMM contracts across all contract crates in `contracts/`. For each code you will find:
+
+- **Numeric code** – the on-chain discriminant embedded in the XDR `InvokeHostFunctionResult` when the contract returns that error.
+- **Symbol** – the symbolic name in Rust source and decoded XDR.
+- **Cause** – what precondition guard was violated in the contract code.
+- **Remedy** – actionable instructions for the caller to recover.
+
+Use the numeric code when parsing RPC responses or writing off-chain tooling.
+=======
 ## Factory
 
 | Code | Name | Description |
@@ -14,8 +25,458 @@
 
 ## Concentrated Liquidity
 
+
 (TODO)
 
 ## Governance
 
+
+Defined in [contracts/amm/src/lib.rs](../contracts/amm/src/lib.rs) as `AmmError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` (or `initialize_with_flash_loan_fee`) was called on a pool that has already been set up. The presence of `DataKey::TokenA` in instance storage is the guard. | Deploy a fresh pool contract instead of re-initializing. |
+| 2 | `InvalidFeeBps` | A fee value was outside `[0, 10 000]` bps, or `protocol_fee_bps` exceeded `fee_bps`, or `new_fee_bps` was below the current `protocol_fee_bps`. | Ensure `0 ≤ protocol_fee_bps ≤ fee_bps ≤ 10 000`. |
+| 3 | `InsufficientShares` | The LP share burn amount in `remove_liquidity` exceeded the provider's actual LP token balance. | Query `shares_of(provider)` first and cap the burn amount to that value. |
+| 4 | `DeadlineExceeded` | The `deadline` ledger timestamp passed before the transaction was included. | Re-submit with `deadline = current_ledger_timestamp + buffer`. |
+| 5 | `SlippageExceeded` | For swaps: `amount_out < min_out` or `required_in > max_in`. For `add_liquidity`: minted shares < `min_shares`. For `remove_liquidity`: `out_a < min_a` or `out_b < min_b`. | Widen slippage bounds or use `simulate_swap` / `get_amount_in` to recalculate before submitting. |
+| 6 | `Paused` | The pool has been administratively paused via `pause()`. All state-mutating functions (swap, add/remove liquidity, flash loan) reject calls while paused. | Wait for the admin (or governance) to call `unpause()`. |
+| 7 | `Unauthorized` | A caller passed an `admin` address that does not match the stored admin. | Use the correct admin keypair. The current admin can be read with `get_info().admin`. |
+| 8 | `ZeroAmount` | An `amount_*` argument was zero or negative (`amount <= 0`). | Pass a strictly positive value. |
+| 9 | `InvalidToken` | `token_in`, `token_out`, or `token` did not match either of the two pool tokens. | Use `get_info()` to discover valid token addresses. |
+| 10 | `EmptyPool` | A swap or `price_ratio` was attempted on a pool where at least one reserve is zero. | Add liquidity before trading. |
+| 11 | `InsufficientLiquidity` | Either `amount_out ≥ reserve_out` (would drain the pool), or `reserve < amount` for a flash loan, or the flash loan receiver did not repay (`balance_after < balance_before + fee`). | Reduce the trade/loan size, or ensure the flash loan receiver repays the principal plus fee within the callback. |
+| 12 | `NoPendingAdmin` | `accept_admin` was called when no admin transfer is in progress. | Call `propose_admin` first to nominate a successor. |
+| 13 | `WrongAdmin` | `accept_admin` was called by an address that does not match the pending nominee. | Have the correct address (the one passed to `propose_admin`) call `accept_admin`. |
+| 14 | `Reentrant` | A flash loan receiver attempted to call back into `swap`, `add_liquidity`, `remove_liquidity`, or `flash_loan` on the same pool while the reentrancy lock (`DataKey::Locked`) was held. | Do not call pool functions from inside `on_flash_loan`. Perform all swaps and liquidity operations before or after the flash loan, not during the callback. |
+| 15 | `CircuitBreaker` | The spot price deviated more than the configured threshold (default 5 000 bps = 50 %) from the value at the start of the block. The pool has been automatically paused. | Wait for the cooldown period to elapse (default 600 s) and call `try_circuit_breaker_recovery`, or have governance call `unpause`. |
+| 16 | `FotSlippage` | A fee-on-transfer token deducted fees resulting in fewer tokens received than the `min_received` guard (`received < min_received`). | Widen `min_received` threshold or trade using standard non-FoT tokens. |
+| 17 | `OracleDeviationExceeded` | Spot price deviated beyond configured oracle tolerance (`\|spot - oracle\| > max_deviation`). | Retry when spot price or oracle price stabilizes within configured tolerance. |
+| 18 | `FlashLoanRepaymentFailed` | Receiver contract failed to return borrowed tokens plus fee (`balance_after < balance_before + fee`). | Ensure `on_flash_loan` callback repays principal and fee in full. |
+| 19 | `AlreadyExecuted` | Emergency withdrawal multisig proposal was already executed (`proposal.executed == true`). | No action required; proposal has already been executed. |
+| 20 | `ProposalExpired` | Emergency withdrawal multisig proposal exceeded its validity window (`now > proposal.expires_at`). | Submit a new emergency withdrawal proposal. |
+
+---
+
+## AmmSdk (`contracts/amm-sdk`)
+
+Defined in [contracts/amm-sdk/src/types.rs](../contracts/amm-sdk/src/types.rs) as `SdkAmmError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called on a pool that is already set up. | Deploy a fresh pool contract instead. |
+| 2 | `InvalidFeeBps` | Fee outside `[0, 10 000]` bps or protocol fee > swap fee. | Use a value in the accepted range. |
+| 3 | `InsufficientShares` | LP burn amount exceeds caller's balance. | Reduce `shares` to ≤ `shares_of(provider)`. |
+| 4 | `DeadlineExceeded` | `deadline` ledger timestamp already passed. | Re-submit with a future deadline. |
+| 5 | `SlippageExceeded` | Output or input violated the slippage guard. | Widen `min_out` / `max_in` or retry later. |
+| 6 | `Paused` | Pool is administratively paused. | Wait for admin to call `unpause`. |
+| 7 | `Unauthorized` | Caller does not match stored admin. | Use correct admin keypair. |
+| 8 | `ZeroAmount` | Amount argument is zero or negative. | Pass a positive value. |
+| 9 | `InvalidToken` | `token_in`/`token_out` is not a pool token. | Use `pool.get_info()` to discover valid tokens. |
+| 10 | `EmptyPool` | One or both reserves are zero. | Add liquidity before trading. |
+| 11 | `InsufficientLiquidity` | Output ≥ reserve or flash loan not repaid. | Reduce trade size or ensure repayment. |
+| 12 | `NoPendingAdmin` | `accept_admin` called without a prior `propose_admin`. | Call `propose_admin` first. |
+| 13 | `WrongAdmin` | `accept_admin` caller ≠ pending nominee. | Have correct address call `accept_admin`. |
+| 14 | `Reentrant` | Reentrant call detected during flash loan callback. | Do not call pool functions from `on_flash_loan`. |
+| 15 | `CircuitBreaker` | Price moved > threshold, pool auto-paused. | Wait for cooldown or governance action. |
+| 16 | `FotSlippage` | Fee-on-transfer token deducted more than `min_received`. | Widen `min_received` or use non-FoT token. |
+| 17 | `OracleDeviationExceeded` | Spot price deviated beyond oracle tolerance. | Retry when oracle price stabilises. |
+| 18 | `FlashLoanRepaymentFailed` | Receiver did not repay borrowed amounts + fees. | Ensure `on_flash_loan` repays in full. |
+| 19 | `AlreadyExecuted` | Multisig emergency withdrawal was already executed. | No action — proposal already carried out. |
+| 20 | `ProposalExpired` | Multisig emergency withdrawal proposal has expired. | Submit a new proposal. |
+
+---
+
+## BatchAuction (`contracts/batch_auction`)
+
+Defined in [contracts/batch_auction/src/lib.rs](../contracts/batch_auction/src/lib.rs) as `AuctionError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called on an already configured auction contract instance. | Deploy a fresh batch auction contract instance. |
+| 2 | `Unauthorized` | Action invoked by caller other than the registered admin or keeper. | Call method using the stored admin or keeper credentials. |
+| 3 | `OrderNotFound` | Order lookup failed for the provided `order_id`. | Query active orders using `get_order` to verify ID before cancelling or modifying. |
+| 4 | `BatchWindowOpen` | Settlement or clearing attempted while the batch submission window is still open. | Wait until batch submission deadline elapses before executing settlement. |
+| 5 | `NoOrders` | Batch clearing executed with zero orders in the current batch queue. | Submit orders to the batch before initiating clearing. |
+| 6 | `ZeroAmount` | Order amount supplied was zero or negative (`amount <= 0`). | Provide a strictly positive order amount. |
+| 7 | `DeadlineExceeded` | Order submission timestamp exceeded order deadline. | Submit order with a future deadline. |
+| 8 | `BatchFull` | Number of orders in batch reached `max_orders` capacity limit. | Wait for the next batch window or increase `max_orders` configuration. |
+| 9 | `InvalidMaxOrders` | `max_orders` set to 0 or above `MAX_ORDERS_CEILING` (200). | Configure `max_orders` within valid `1..=200` range. |
+| 10 | `InvalidPoolTokenPair` | Specified `(token_in, token_out)` pair does not match the auction pool's token pair. | Pass token addresses matching the configured pool tokens. |
+| 11 | `TransferFailed` | Token transfer to/from trader failed during deposit or payout. | Verify token balance and allowance before placing order. |
+| 12 | `NoPendingAdmin` | `accept_admin` called without a prior `propose_admin`. | Call `propose_admin` first to set nominee. |
+| 13 | `WrongAdmin` | `accept_admin` called by address other than the nominated pending admin. | Invoke `accept_admin` from the nominee address. |
+
+---
+
+## BatchRouter (`contracts/batch_router`)
+
+Uses runtime `panic!` and `assert!` preconditions (defined in [contracts/batch_router/src/lib.rs](../contracts/batch_router/src/lib.rs)).
+
+| Panic / Assert Message | Cause | Remedy |
+|-----------------------|-------|--------|
+| `already initialized` | `initialize` called on an already set up batch router (`DataKey::Admin` exists). | Deploy a fresh batch router contract instance. |
+| `empty batch` | `execute_batch` called with an empty operations array (`ops.is_empty()`). | Provide at least one batch operation. |
+| `deadline expired` | `env.ledger().timestamp() > deadline` during batch execution. | Re-submit batch with a future deadline. |
+| `expected swap result, got {other:?}` | Batch operation result variant mismatch during swap execution. | Ensure batch operation configuration matches expected output type. |
+| `expected add-liquidity result, got {other:?}` | Batch operation result variant mismatch during liquidity addition. | Ensure operation parameters match add-liquidity output variant. |
+| `expected remove-liquidity result, got {other:?}` | Batch operation result variant mismatch during liquidity removal. | Ensure operation parameters match remove-liquidity output variant. |
+
+---
+
+## ClPositionNft (`contracts/cl_position_nft`)
+
+Defined in [contracts/cl_position_nft/src/lib.rs](../contracts/cl_position_nft/src/lib.rs) as `NftError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called on an already configured NFT contract. | Deploy a fresh NFT contract. |
+| 2 | `Unauthorized` | Restricted method called by non-admin or unauthorized address. | Invoke function using admin or registered CL pool credentials. |
+| 3 | `TokenNotFound` | Operation referenced a non-existent or burned `token_id`. | Query existing tokens using `owner_of` to confirm `token_id`. |
+| 4 | `NotOwnerOrApproved` | Transfer or burn attempted by caller who is neither token owner nor approved operator. | Execute call from owner account or approve operator via `approve`. |
+| 5 | `InvalidReceiver` | Safe transfer target contract rejected token reception or failed check. | Ensure target contract implements `on_nft_received` hook. |
+| 6 | `InvalidTtlConfig` | TTL parameters outside acceptable limits. | Provide valid TTL duration values. |
+
+---
+
+## ConcentratedLiquidity (`contracts/concentrated_liquidity`)
+
+Defined in [contracts/concentrated_liquidity/src/lib.rs](../contracts/concentrated_liquidity/src/lib.rs) as `ClError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called on an already-configured pool. | Deploy a new pool. |
+| 2 | `TokensMustDiffer` | `token_a == token_b` during initialization. | Use two distinct token addresses. |
+| 3 | `InvalidFeeBps` | Fee outside `[0, 10 000]` bps. | Use a value in the accepted range. |
+| 4 | `TickOutOfRange` | A tick value was outside `[-MAX_TICK, MAX_TICK]` (±887 272). `lower_tick` must also be < `upper_tick`. | Keep ticks inside the valid range and ensure lower < upper. |
+| 5 | `ZeroAmounts` | Both `amount_a_desired` and `amount_b_desired` were zero or negative. | Provide at least one positive desired amount. |
+| 6 | `SlippageExceeded` | `amount_a < min_a` or `amount_b < min_b` on `mint_position`, or output below `min_out` on `swap`. | Widen slippage bounds. |
+| 7 | `ZeroLiquidity` | Computed liquidity for a new position was zero (amounts too small relative to the price range). | Increase the deposit amounts or narrow the tick range. |
+| 8 | `InsufficientLiquidity` | `burn_position` requested more liquidity than the position holds, or swap output would exceed available liquidity. | Burn ≤ `position.liquidity`; reduce swap size. |
+| 9 | `PositionNotFound` | `collect_fees`, `burn_position`, or `collect_all` referenced a position `(owner, lower_tick, upper_tick)` that does not exist. | Verify the position exists with `get_position` before operating on it. |
+| 10 | `DeadlineExpired` | The `deadline` timestamp passed before execution. | Re-submit with a future deadline. |
+| 11 | `Paused` | Pool is paused. | Wait for admin to unpause. |
+| 12 | `Unauthorized` | Admin mismatch. | Use the stored admin address. |
+| 13 | `TickNotAligned` | A tick was not a multiple of `tick_spacing`. | Round ticks to the nearest multiple of `tick_spacing`. |
+| 14 | `InvalidTickSpacing` | `tick_spacing ≤ 0` during initialization. | Use a positive tick spacing (common values: 1, 10, 60, 200). |
+| 15 | `TickNotInitialized` | A swap crossed into a tick that has no liquidity (never been used by any position). | Ensure positions cover the full swap range, or use a smaller swap amount. |
+| 16 | `InvalidToken` | `token_in` is not `token_a` or `token_b`. | Check `get_info()` for valid token addresses. |
+| 17 | `RangeOrderInRange` | `place_range_order` called when current tick is inside `[lower_tick, upper_tick)`. | Select a tick range strictly above or below current tick. |
+| 18 | `OracleDeviationExceeded` | Spot price deviated beyond configured oracle tolerance during swap. | Wait for oracle price to stabilize or adjust tolerance. |
+| 19 | `NftNotConfigured` | Tokenization attempted when no NFT contract address is set in storage. | Call `set_nft_contract` with a valid position NFT contract. |
+| 20 | `NotNftOwner` | Caller is not current owner of position NFT. | Call method from NFT owner account. |
+| 21 | `NftContractChangeBlocked` | Admin attempted NFT contract change while tokenized positions exist. | Untokenize/burn active position NFTs before changing contract. |
+| 22 | `RangeOrderExists` | Range order already active on specified range for caller. | Withdraw existing range order before placing a new one. |
+
+---
+
+## DexAggregator (`contracts/dex_aggregator`)
+
+Defined in [contracts/dex_aggregator/src/lib.rs](../contracts/dex_aggregator/src/lib.rs) as `AggregatorError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `NoRouteFound` | No valid liquidity route connects `token_in` and `token_out` across registered pools. | Provide connected intermediate pools or update route path. |
+| 2 | `SlippageExceeded` | Total output across aggregated swap steps fell below `min_amount_out`. | Widen slippage tolerance or update quote before submitting. |
+
+---
+
+## Factory (`contracts/factory`)
+
+Defined in [contracts/factory/src/lib.rs](../contracts/factory/src/lib.rs) as `FactoryError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called twice. | Only initialize the factory once after deployment. |
+| 2 | `InvalidFeeBps` | Fee outside `[0, 10 000]`. | Correct the fee value. |
+| 3 | `PoolAlreadyExists` | `create_pool` was called for a `(token_a, token_b)` pair that already has an AMM pool. | Use `get_pool` to retrieve the existing pool address. |
+| 4 | `ClPoolAlreadyExists` | `create_cl_pool` was called for a pair/fee that already has a CL pool. | Use `get_cl_pool` to retrieve the existing address. |
+| 5 | `ClWasmNotSet` | Tried to create a CL pool before the CL WASM hash was registered via `set_cl_wasm`. | Call `set_cl_wasm` with the uploaded CL contract hash first. |
+| 6 | `Unauthorized` | Non-admin called an admin-only factory function. | Use the factory admin keypair. |
+| 7 | `FeeNotConfigured` | Attempted pool creation with unconfigured or invalid fee tier. | Use a configured fee tier (e.g., 1, 5, 30, 100 bps). |
+| 8 | `RateLimitExceeded` | Pool creation rate limit reached for current epoch. | Wait for rate limit window to reset. |
+| 9 | `CreationPaused` | Admin administratively paused pool creation. | Wait for admin to unpause creation. |
+
+---
+
+## Governance (`contracts/governance`)
+
+Defined in [contracts/governance/src/lib.rs](../contracts/governance/src/lib.rs) as `GovernanceError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | Governance initialized twice. | Deploy a new governance contract. |
+| 2 | `InvalidVotingPeriod` | Voting period is zero or below the minimum. | Use a period ≥ 1 ledger. |
+| 3 | `InvalidTimelock` | Timelock duration is below the minimum. | Increase the timelock value. |
+| 4 | `InvalidQuorumBps` | Quorum outside `(0, 10 000]`. | Use a positive bps value ≤ 10 000. |
+| 5 | `InvalidProposerStake` | Proposer stake threshold is zero. | Set a positive minimum stake. |
+| 6 | `InvalidFeeBps` | Fee value out of range. | Use `[0, 10 000]`. |
+| 7 | `ZeroTotalSupply` | Vote weight computed on a zero LP supply. | Seed the pool with liquidity before creating proposals. |
+| 8 | `InsufficientStake` | Proposer's LP stake is below `min_proposer_stake`. | Acquire more LP tokens before proposing. |
+| 9 | `ProposalNotFound` | Referenced proposal ID does not exist. | Use `get_proposal` to verify the ID. |
+| 10 | `VotingNotStarted` | Tried to vote before the proposal's start block. | Wait until the voting period begins. |
+| 11 | `VotingPeriodEnded` | Tried to vote after the voting period closed. | Votes cannot be cast after closure. |
+| 12 | `AlreadyExecuted` | `execute` called on a proposal that was already executed. | Each proposal can only be executed once. |
+| 13 | `ProposalCancelled` | Action on a cancelled proposal. | The proposal is terminal; create a new one. |
+| 14 | `AlreadyVoted` | The caller already cast a vote on this proposal. | Each address can vote once per proposal. |
+| 15 | `NoVotingPower` | Caller's LP balance snapshot at proposal creation was zero. | You must hold LP tokens at the proposal creation block to vote. |
+| 16 | `VotingPeriodActive` | Tried to execute while voting is still open. | Wait for the voting period to end. |
+| 17 | `ProposalExpired` | `execute` called after the execution window expired. | Create a new proposal. |
+| 18 | `TimelockNotElapsed` | `execute` called before the timelock delay elapsed. | Wait the full timelock duration after the voting period ends. |
+| 19 | `QuorumNotMet` | Total votes did not reach the quorum threshold. | The proposal fails; if needed, create a new one with broader participation. |
+| 20 | `ProposalDefeated` | More votes were cast against than for. | Create a new proposal with updated parameters. |
+| 21 | `NotProposer` | `cancel` called by someone other than the original proposer. | Only the proposer can cancel before voting ends. |
+| 22 | `NoLockedVote` | `unlock_vote` called when no vote was locked. | Only addresses that voted with token lock need to call `unlock_vote`. |
+| 23 | `ProposalNotConcluded` | `unlock_vote` or `claim_rewards` called before the proposal concluded. | Wait for the proposal to reach a terminal state. |
+| 24 | `CannotDelegateToSelf` | A delegator tried to delegate to themselves. | Delegate to a different address. |
+| 25 | `Unauthorized` | Admin-only operation called by non-admin. | Use the governance admin. |
+| 26 | `HasDelegated` | Operation requires direct voting power but caller has already delegated. | Undelegate first. |
+| 27 | `DelegationCycle` | The delegation would create a cycle (A → B → … → A). | Choose a delegate that is not already part of this principal's delegation chain. |
+| 28 | `ProposalVetoed` | A veto multisig vetoed the proposal. | Create a new proposal; adjust to address the veto reason. |
+| 29 | `VetoWindowExpired` | Veto attempted after the veto window closed. | Vetoes must be cast within the veto window after voting ends. |
+| 30 | `NotVetoMultisig` | Veto called by an address that is not the configured veto multisig. | Only the veto multisig can veto proposals. |
+| 31 | `InsufficientSnapshotBal` | Snapshot balance at proposal creation was insufficient. | Acquire more LP tokens before the proposal snapshot block. |
+| 32 | `VetoMultisigNotSet` | Veto-related operation called when no veto multisig is configured. | Configure the veto multisig during governance initialization. |
+| 33 | `NoPendingAdmin` | `accept_admin` called without a prior `propose_admin`. | Call `propose_admin` first to nominate a successor. |
+| 34 | `PartialFactoryUpdate` | `UpdateFactoryGlobalFee` proposal window (`offset`/`limit`) does not cover all factory pools. | Submit proposal covering all registered factory pools. |
+
+---
+
+## IncentiveCampaigns (`contracts/incentive_campaigns`)
+
+Uses runtime `panic!` and `assert!` preconditions (defined in [contracts/incentive_campaigns/src/lib.rs](../contracts/incentive_campaigns/src/lib.rs)).
+
+| Panic / Assert Message | Cause | Remedy |
+|-----------------------|-------|--------|
+| `already initialized` | Contract initialized twice. | Initialize once upon deployment. |
+| `not governance` | Restricted method called by non-governance account. | Call using governance credentials. |
+| `not pending governance` | `accept_governance` called by non-nominee. | Call from nominated governance address. |
+| `invalid campaign window` | `end_time <= start_time`. | Ensure `start_time < end_time`. |
+| `reward_rate must be positive` | Reward rate configured as 0. | Specify reward rate > 0. |
+| `funding required` | Funding amount specified as 0. | Supply positive reward funding. |
+| `lp_token does not match pool` | LP token address mismatch with target pool. | Pass LP token matching pool configuration. |
+| `campaign not yet ended` | Emergency recover called before `end_time`. | Wait for campaign end time before recovering unallocated funds. |
+| `no leftover funds to recover` | Recover called when unallocated funds equal 0. | No action needed; funds fully distributed. |
+| `campaign inactive` | Action attempted on inactive campaign. | Activate campaign before interacting. |
+| `campaign not started` | Stake/claim attempted before `start_time`. | Wait for campaign start timestamp. |
+| `no LP balance` | Caller holds 0 LP tokens. | Deposit liquidity to earn LP tokens before staking. |
+| `no LP supply` | Total pool LP supply is 0. | Seed pool with liquidity. |
+| `no pending rewards` | Claim attempted with 0 accumulated rewards. | Wait for reward accumulation over time. |
+
+---
+
+## OracleAggregator (`contracts/oracle_aggregator`)
+
+Defined in [contracts/oracle_aggregator/src/lib.rs](../contracts/oracle_aggregator/src/lib.rs) as `OracleError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called more than once. | Initialize once at deployment. |
+| 2 | `NotInitialized` | Oracle query called before contract initialization. | Initialize contract first. |
+| 3 | `NotAdmin` | Restricted operation called by non-admin. | Call from admin address. |
+| 4 | `SourceAlreadyRegistered` | Oracle source ID already registered. | Update existing source or use unique ID. |
+| 5 | `SourceNotFound` | Referenced oracle source ID not registered. | Register oracle source before querying. |
+| 6 | `InsufficientSources` | Fewer active sources available than required quorum. | Register additional valid oracle sources. |
+| 7 | `InvalidStaleness` | Max staleness parameter is 0 or invalid. | Set positive max staleness duration. |
+| 8 | `InvalidDeviation` | Max allowed price deviation parameter out of bounds. | Set valid deviation threshold. |
+
+---
+
+## PolVesting (`contracts/pol_vesting`)
+
+Defined in [contracts/pol_vesting/src/lib.rs](../contracts/pol_vesting/src/lib.rs) as `VestingError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | Contract already initialized. | Initialize once. |
+| 2 | `NotGovernance` | Action called by non-governance address. | Invoke from governance address. |
+| 3 | `VestingNotFound` | Vesting schedule does not exist for beneficiary. | Create schedule before releasing/revoking. |
+| 4 | `VestingAlreadyExists` | Schedule already exists for beneficiary. | Revoke existing schedule or use new beneficiary. |
+| 5 | `NothingToRelease` | Zero vested tokens available to release at current timestamp. | Wait for vesting cliff or schedule progression. |
+| 6 | `InvalidSchedule` | `start_time >= end_time` or cliff outside schedule window. | Ensure `start_time < cliff <= end_time`. |
+| 7 | `NotBeneficiary` | Release attempted by non-beneficiary account. | Call release from beneficiary address. |
+| 8 | `NoPendingGovernance` | `accept_governance` called without prior proposal. | Propose governance transfer first. |
+| 9 | `NoPendingTreasury` | `accept_treasury` called without prior proposal. | Propose treasury transfer first. |
+| 10 | `NotTreasury` | Action called by non-treasury address. | Call from stored treasury address. |
+
+---
+
+## ReserveManager (`contracts/reserve_manager`)
+
+Defined in [contracts/reserve_manager/src/lib.rs](../contracts/reserve_manager/src/lib.rs) as `ReserveManagerError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `NoPendingGovernance` | `accept_governance` called without pending transfer. | Propose governance transfer first. |
+| 2 | `Unauthorized` | Action invoked by non-governance account. | Call from authorized governance account. |
+| 3 | `AlreadyInitialized` | Reserve manager initialized twice. | Initialize once upon deployment. |
+| 4 | `NegativeReserveAmount` | `min_reserve` specified as negative value. | Pass non-negative reserve amount. |
+
+---
+
+## Router (`contracts/router`)
+
+Uses runtime `panic!` and `assert!` preconditions (defined in [contracts/router/src/lib.rs](../contracts/router/src/lib.rs)).
+
+| Panic / Assert Message | Cause | Remedy |
+|-----------------------|-------|--------|
+| `already initialized` | `initialize` called twice (`DataKey::Factory` exists). | Initialize router contract once. |
+| `path must have at least 2 tokens` | `path.len() < 2` in swap/quote functions. | Pass path array containing ≥ 2 token addresses. |
+| `amount_in must be positive` | `amount_in <= 0` in `swap_exact_in` or `get_amount_out_path`. | Pass strictly positive input amount. |
+| `amount_out must be positive` | `amount_out <= 0` in `swap_exact_out`. | Pass strictly positive output amount. |
+| `DeadlineExpired` | `env.ledger().timestamp() > deadline`. | Re-submit swap with future deadline. |
+| `no pool for hop {i}` | Factory returned no pool for token pair at hop `i`. | Ensure liquidity pool exists for every adjacent pair in path. |
+| `Slippage exceeded` | Output `< min_amount_out` or input `> max_in`. | Widen slippage bounds or recalculate path quote. |
+
+---
+
+## Staking (`contracts/staking`)
+
+Uses runtime `panic!` and `assert!` preconditions (defined in [contracts/staking/src/lib.rs](../contracts/staking/src/lib.rs)).
+
+| Panic / Assert Message | Cause | Remedy |
+|-----------------------|-------|--------|
+| `already initialized` | Contract initialized twice. | Initialize contract once. |
+| `contract is paused` | Action attempted while contract paused. | Wait for admin to unpause contract. |
+| `not admin` | Restricted function called by non-admin. | Call from stored admin address. |
+| `nothing staked` | Action attempted by user with 0 staked balance. | Stake tokens before withdrawing/claiming. |
+| `amount must be positive` | Amount supplied is zero or negative. | Provide strictly positive token amount. |
+| `insufficient staked amount` | Withdrawal requested exceeds user staked balance. | Withdraw ≤ staked balance. |
+| `tokens are still locked` | Unstake called before lock duration expires (`now < lock_expiry`). | Wait for lock duration to elapse. |
+| `no active lock to extend` | `extend_lock` called with no active lock. | Stake with lock duration first. |
+| `duration must be positive` | Lock duration set to 0. | Specify positive lock duration seconds. |
+| `no pending rewards` | Claim attempted with 0 pending rewards. | Allow rewards to accrue over time. |
+
+---
+
+## Token (`contracts/token`)
+
+Uses runtime `panic!` and `assert!` preconditions (defined in [contracts/token/src/lib.rs](../contracts/token/src/lib.rs)).
+
+| Panic / Assert Message | Cause | Remedy |
+|-----------------------|-------|--------|
+| `already initialized` | Token contract initialized twice. | Initialize once upon deployment. |
+| `amount must be positive` | Amount specified is zero or negative (`amount <= 0`). | Pass strictly positive amount. |
+| `amount must be non-negative` | Allowance amount negative (`amount < 0`). | Pass non-negative allowance. |
+| `insufficient balance` | Transfer or burn amount exceeds account balance. | Transfer/burn ≤ available balance. |
+| `insufficient allowance` | `transfer_from` or `burn_from` exceeds approved allowance. | Approve sufficient allowance prior to transfer. |
+| `current_admin is not admin` | Admin transfer called by unauthorized address. | Call from current admin account. |
+| `not pending admin` | `claim_admin` called by non-nominee. | Call from nominated pending admin address. |
+| `migrate amount exceeds total locked` | Migration amount exceeds total locked token balance. | Migrate amount ≤ total locked tokens. |
+
+---
+
+## TwalConsumer (`contracts/twal_consumer`)
+
+Defined in [contracts/twal_consumer/src/lib.rs](../contracts/twal_consumer/src/lib.rs) as `TwalError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called on already set up contract. | Deploy a fresh TWAL consumer. |
+| 2 | `NotInitialized` | Function called before contract initialization. | Call `initialize` first. |
+| 3 | `ZeroWindow` | Time window for TWAL calculation is zero. | Pass window duration > 0. |
+| 4 | `InsufficientHistory` | Available snapshot span shorter than requested window. | Wait for more snapshots to accumulate. |
+| 5 | `NoSnapshotFound` | No snapshot exists at target timestamp. | Ensure snapshots recorded by keeper. |
+| 6 | `ElapsedZero` | Elapsed time between bounding snapshots is zero. | Select window spanning distinct ledger timestamps. |
+
+---
+
+## TwapConsumer (`contracts/twap_consumer`)
+
+Defined in [contracts/twap_consumer/src/lib.rs](../contracts/twap_consumer/src/lib.rs) as `TwapError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | Contract already initialized. | Initialize once. |
+| 2 | `NotInitialized` | Invoked function before initialization. | Call `initialize` first. |
+| 3 | `ZeroWindow` | Time window specified as zero. | Pass window > 0. |
+| 4 | `InsufficientHistory` | Price history span shorter than window. | Allow snapshots to build over time. |
+| 5 | `NoSnapshotFound` | No price snapshot found for timestamp. | Wait for keeper to record snapshot. |
+| 6 | `ElapsedZero` | Time difference between bounding snapshots is zero. | Request TWAP over non-zero interval. |
+| 7 | `InvalidSpotPrice` | Queried spot price zero or negative. | Verify pool liquidity and reserves. |
+| 8 | `InvalidTwapPrice` | Computed TWAP price zero or invalid. | Ensure valid price snapshots exist. |
+| 9 | `InvalidDeviationBps` | Deviation threshold BPS out of bounds. | Pass deviation BPS in `[0, 10 000]`. |
+| 10 | `NegativeCollateral` | Calculated collateral value negative. | Pass positive asset amounts. |
+| 11 | `PriceManipulated` | Spot price deviated beyond allowed BPS from TWAP. | Retry when spot price aligns with TWAP. |
+
+---
+
+## V2ToV3Migration (`contracts/v2_to_v3_migration`)
+
+Defined in [contracts/v2_to_v3_migration/src/lib.rs](../contracts/v2_to_v3_migration/src/lib.rs) as `MigrationError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `NotInitialized` | Migration contract not initialized. | Call `initialize` first. |
+| 2 | `AlreadyInitialized` | `initialize` called twice. | Deploy new migration contract. |
+| 3 | `Unauthorized` | Call made by non-admin user. | Use admin credentials. |
+| 4 | `ZeroShares` | `migrate_liquidity` called with zero LP shares. | Pass positive share amount. |
+| 5 | `InvalidRange` | Tick range `(lower_tick, upper_tick)` invalid. | Ensure `lower_tick < upper_tick` within bounds. |
+| 6 | `SlippageExceeded` | V3 liquidity minted fell below slippage limits. | Widen slippage bounds. |
+| 7 | `MigrationFailed` | V2 burn or V3 mint contract call failed. | Verify V2 LP balance and V3 parameters. |
+| 8 | `TokenMismatch` | V2 pool tokens do not match V3 pool tokens. | Select matching V2 and V3 pools. |
+
+---
+
+## AmmFuzz (`contracts/amm-fuzz`)
+
+Test-only crate ([contracts/amm-fuzz/src/lib.rs](../contracts/amm-fuzz/src/lib.rs)).
+
+Contains property-based and fuzz testing suites for constant-product invariants and real WASM deployments. Exposes no on-chain contract error codes or panics.
+
+---
+
+## IntegrationTests (`contracts/integration-tests`)
+
+Test harness crate ([contracts/integration-tests/src/lib.rs](../contracts/integration-tests/src/lib.rs)).
+
+Contains integration and upgrade test suites for multi-contract interactions. Exposes no on-chain contract error codes or panics.
+
+---
+
+## Decoding errors from RPC responses
+
+When `stellar-sdk-rs` (or the Soroban RPC) returns a failed invocation, the
+result contains an XDR `ScError` with kind `Contract` and a `code` field. Map
+the code to the table above using the contract address to identify which enum
+applies.
+
+```rust
+// Pseudocode — adapt to your stellar-sdk-rs version
+match result {
+    InvocationResult::Err(ScError::Contract(code)) => {
+        match contract_address {
+            addr if addr == amm_pool => AmmError::from(code),
+            addr if addr == cl_pool  => ClError::from(code),
+            addr if addr == factory  => FactoryError::from(code),
+            _ => eprintln!("unknown contract error {code}"),
+        }
+    }
+    _ => {}
+}
+```
+
+All error codes are stable across minor contract upgrades. A code is only
+ever removed or renumbered in a major version bump accompanied by a migration
+guide in [CHANGELOG.md](../CHANGELOG.md).
+
+---
+
+## Keeping documentation in sync
+
+Error code definitions live alongside the contract source. To run automated verification of documentation sync across all `#[contracterror]` enums:
+
+```bash
+make check-docs
+```
+
+Or execute the check script directly:
+
+```bash
+bash scripts/check_error_docs.sh
+```
+
+CI automatically runs `make check-docs` on every pull request and push to prevent documentation drift.
+=======
 (TODO)
+
