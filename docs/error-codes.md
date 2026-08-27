@@ -77,6 +77,35 @@ Defined in [contracts/factory/src/lib.rs](../contracts/factory/src/lib.rs) as `F
 
 ---
 
+## ClPositionNft (`contracts/cl_position_nft`)
+
+Defined in [contracts/cl_position_nft/src/lib.rs](../contracts/cl_position_nft/src/lib.rs) as `NftError`.
+
+| Code | Symbol | Cause | Remedy |
+|------|--------|-------|--------|
+| 1 | `AlreadyInitialized` | `initialize` called twice. | Deploy a new NFT contract instead. |
+| 2 | `Unauthorized` | A caller other than the registered `cl_pool` called `mint`/`burn`, or `set_ttl_params`/`migrate_ownership_index` was called by a non-admin (or before `initialize`). | Use the registered pool address (for mint/burn) or the admin address (for the others). |
+| 3 | `TokenNotFound` | `owner_of`, `position_meta`, `burn`, `approve`, or `transfer` referenced a `token_id` that does not exist (never minted, or already burned). | Verify the id with `owner_of`/`total_supply` first. |
+| 4 | `NotOwnerOrApproved` | `transfer` called by an address that is neither the token's owner, its approved address, nor an approved operator for the owner. | Use the owner, an approved address, or an approved operator. |
+| 5 | `InvalidReceiver` | Reserved; not currently returned by any function. | — |
+| 6 | `InvalidTtlConfig` | `set_ttl_params` was called with `bump_to < min_ttl_threshold`. | Ensure `bump_to >= min_ttl_threshold`. |
+| 7 | `TooManyPositions` | `mint` (or the `to` side of `transfer`) would push an owner's O(1)-indexed holdings past `MAX_POSITIONS_PER_OWNER` (10,000). Defence in depth introduced in #697, on top of the O(1) index fix itself. | Transfer or burn existing positions for that owner first. |
+
+#697 replaced the single unbounded `OwnedTokens(owner) -> Vec<u64>` per-owner
+list with a constant-cost index (`OwnerTokenCount`, `OwnerTokenByIndex`,
+`TokenIndexOfOwner`), so `mint`, `burn`, and `transfer` each touch a fixed
+number of storage entries regardless of how many positions an owner holds.
+`balance_of`, `tokens_of`, `tokens_of_paginated`, and
+`token_of_owner_by_index` read only that index. A legacy `OwnedTokens`
+vector from before this upgrade is not written to again — `burn` and the
+"from" side of `transfer` fall back to an O(n) removal from it only when a
+token has no index slot, and the admin-only `migrate_ownership_index` moves
+a legacy vector into the index in bounded chunks. See the "#697: ownership
+index" doc comment in `cl_position_nft/src/lib.rs` for the full design and
+its trade-offs.
+
+---
+
 ## Governance (`contracts/governance`)
 
 Defined in [contracts/governance/src/lib.rs](../contracts/governance/src/lib.rs) as `GovernanceError`.
