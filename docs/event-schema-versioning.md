@@ -108,6 +108,14 @@ Total: **30 sites migrated**.
 `contracts/staking/src/lib.rs` was inspected but has no event emissions
 yet — once it starts emitting it should adopt the macro from day one.
 
+`contracts/twal_consumer/src/lib.rs` is intentionally out of scope. It
+already emitted an unversioned `snapshot_deleted` event before this
+migration, and the tracked-pool lifecycle events added in #695
+(`pool_add`, `pool_remove`) follow that same existing, unversioned
+convention rather than mixing versioning schemes within one contract.
+Migrating `twal_consumer` to `emit_versioned_event!` — all three event
+sites at once — is left as a follow-up.
+
 Test files in each of those crates were updated to decode the
 versioned payload shape; see `__ver_N` locals + `assert_eq!(version,
 EVENT_SCHEMA_VERSION)` assertions added by `migrate_tests.py`.
