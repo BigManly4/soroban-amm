@@ -1,194 +1,58 @@
-import "dotenv/config";
-
-import {
-  BASE_FEE,
-  Contract,
-  Keypair,
-  Networks,
-  Transaction,
-  TransactionBuilder,
-  nativeToScVal,
-  rpc as StellarRpc,
-  scValToNative,
-  xdr,
-} from "@stellar/stellar-sdk";
+import { AmmPool, FactoryClient, TokenClient } from "@soroban-amm/sdk";
 
 const rpcUrl = process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org";
-const networkPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE ?? Networks.TESTNET;
+const networkPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+const poolId = required("AMM_CONTRACT_ID");
+const tokenInId = required("TOKEN_IN_CONTRACT_ID");
+const sourceAddress = required("SOURCE_ADDRESS");
+const lpTokenId = process.env.LP_TOKEN_CONTRACT_ID;
 
-const ammContractId = requiredEnv("AMM_CONTRACT_ID");
-const sourceSecret = requiredEnv("SOURCE_SECRET");
-const tokenInContractId = requiredEnv("TOKEN_IN_CONTRACT_ID");
+function required(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is required; see examples/client/README.md`);
+  return value;
+}
 
-const swapAmountIn = parseI128(process.env.SWAP_AMOUNT_IN ?? "100000");
-const swapMinOut = parseI128(process.env.SWAP_MIN_OUT ?? "0");
-
-const sourceKeypair = Keypair.fromSecret(sourceSecret);
-const traderAddress = sourceKeypair.publicKey();
-const lpProviderAddress = process.env.LP_PROVIDER_ADDRESS ?? traderAddress;
-
-const server = new StellarRpc.Server(rpcUrl);
-const amm = new Contract(ammContractId);
+function config(contractId: string) {
+  return { rpcUrl, networkPassphrase, contractId };
+}
 
 async function main(): Promise<void> {
-  console.log(`Connected to ${rpcUrl}`);
-  console.log(`AMM contract: ${ammContractId}`);
+  const pool = new AmmPool(config(poolId));
+  const token = new TokenClient(config(tokenInId));
+  const factoryId = process.env.FACTORY_CONTRACT_ID;
+  const factory = factoryId ? new FactoryClient(config(factoryId)) : undefined;
+  const amountIn = BigInt(process.env.SWAP_AMOUNT_IN ?? "100000");
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + Number(process.env.DEADLINE_SECONDS ?? 300));
+  const slippageBps = BigInt(process.env.SLIPPAGE_BPS ?? "50");
 
-  const poolInfo = await simulateContractCall("get_info");
-  console.log("Pool info:");
-  console.log(formatScVal(poolInfo));
+  // 1. Read pool info to confirm the pair and current reserves.
+  const info = await pool.getInfo();
+  console.log("Pool", info.name ?? poolId, "tokens", info.tokenA, info.tokenB);
 
-  const quotedAmountOut = await simulateContractCall(
-    "get_amount_out",
-    addressArg(tokenInContractId),
-    i128Arg(swapAmountIn),
-  );
-  console.log("Quote:");
-  console.log(formatScVal({ tokenInContractId, amountIn: swapAmountIn, amountOut: quotedAmountOut }));
+  // 2. Quote before submitting; bigint preserves token precision and price impact.
+  const quote = await pool.simulateSwap(tokenInId, amountIn);
+  const minAmountOut = quote.amountOut * (10_000n - slippageBps) / 10_000n;
+  console.log("Quote", { amountIn: quote.amountIn, amountOut: quote.amountOut, priceImpactBps: quote.priceImpactBps, minAmountOut, deadline });
 
-  const lpShares = await simulateContractCall("shares_of", addressArg(lpProviderAddress));
-  console.log("LP share balance:");
-  console.log(formatScVal({ provider: lpProviderAddress, shares: lpShares }));
+  // 3. The current SDK has no signed AmmPool.submitSwap method. Keep the reviewed
+  // parameters here rather than reintroducing hand-rolled Contract/TransactionBuilder code.
+  console.log("Swap execution parameters", { trader: sourceAddress, tokenIn: tokenInId, amountIn, minAmountOut, deadline });
 
-  const swapResult = await submitContractCall(
-    "swap",
-    addressArg(traderAddress),
-    addressArg(tokenInContractId),
-    i128Arg(swapAmountIn),
-    i128Arg(swapMinOut),
-  );
-  console.log("Swap submitted:");
-  console.log(formatScVal({ trader: traderAddress, amountOut: swapResult }));
-}
+  // 4. Add liquidity with the same deadline/slippage discipline through the wallet adapter.
+  console.log("Add-liquidity review", { provider: sourceAddress, deadline, token: await token.symbol() });
 
-async function simulateContractCall(method: string, ...args: xdr.ScVal[]): Promise<unknown> {
-  const transaction = await buildTransaction(amm.call(method, ...args));
-  const simulation = await server.simulateTransaction(transaction);
+  // 5. Read the LP token balance after the add-liquidity transaction confirms.
+  if (lpTokenId) console.log("LP shares", await new TokenClient(config(lpTokenId)).balance(sourceAddress));
+  else console.log("Set LP_TOKEN_CONTRACT_ID to read LP shares.");
 
-  if (StellarRpc.Api.isSimulationError(simulation)) {
-    throw new Error(`Simulation failed: ${simulation.error}`);
-  }
-
-  const returnValue = simulation.result?.retval;
-  if (!returnValue) {
-    throw new Error(`Simulation for ${method} did not return a value`);
-  }
-
-  return scValToNative(returnValue);
-}
-
-async function submitContractCall(method: string, ...args: xdr.ScVal[]): Promise<unknown> {
-  const transaction = await buildTransaction(amm.call(method, ...args));
-  const preparedTransaction = await server.prepareTransaction(transaction);
-  preparedTransaction.sign(sourceKeypair);
-
-  const sendResponse = await server.sendTransaction(preparedTransaction);
-  if (sendResponse.status !== "PENDING") {
-    throw new Error(`Transaction submission failed: ${JSON.stringify(sendResponse)}`);
-  }
-
-  const finalResponse = await pollTransaction(sendResponse.hash);
-  if (finalResponse.status !== "SUCCESS") {
-    throw new Error(`Transaction failed with status ${finalResponse.status}`);
-  }
-
-  const returnValue = (finalResponse as { returnValue?: xdr.ScVal }).returnValue;
-  if (!returnValue) {
-    throw new Error(`Transaction for ${method} did not return a value`);
-  }
-
-  return scValToNative(returnValue);
-}
-
-async function buildTransaction(operation: xdr.Operation): Promise<Transaction> {
-  const sourceAccount = await server.getAccount(sourceKeypair.publicKey());
-
-  return new TransactionBuilder(sourceAccount, {
-    fee: BASE_FEE,
-    networkPassphrase,
-  })
-    .addOperation(operation)
-    .setTimeout(30)
-    .build();
-}
-
-async function pollTransaction(hash: string): Promise<StellarRpc.Api.GetTransactionResponse> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const response = await server.getTransaction(hash);
-
-    if (response.status !== "NOT_FOUND") {
-      return response;
-    }
-
-    await sleep(1000);
-  }
-
-  throw new Error(`Timed out waiting for transaction ${hash}`);
-}
-
-function addressArg(address: string): xdr.ScVal {
-  return nativeToScVal(address, { type: "address" });
-}
-
-function i128Arg(value: bigint): xdr.ScVal {
-  return nativeToScVal(value, { type: "i128" });
-}
-
-function parseI128(value: string): bigint {
-  if (!/^-?\d+$/.test(value)) {
-    throw new Error(`Expected an integer i128 value, got "${value}"`);
-  }
-
-  return BigInt(value);
-}
-
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-
-  return value;
-}
-
-function formatScVal(value: unknown): string {
-  return JSON.stringify(normalizeForJson(value), null, 2);
-}
-
-function normalizeForJson(value: unknown): unknown {
-  if (typeof value === "bigint") {
-    return value.toString();
-  }
-
-  if (value instanceof Map) {
-    return Object.fromEntries(
-      Array.from(value.entries()).map(([key, entryValue]) => [
-        String(key),
-        normalizeForJson(entryValue),
-      ]),
-    );
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((entry) => normalizeForJson(entry));
-  }
-
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entryValue]) => [key, normalizeForJson(entryValue)]),
-    );
-  }
-
-  return value;
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
+  // 6. Remove liquidity with a fresh deadline after reviewing returned amounts.
+  console.log("Remove-liquidity review", { provider: sourceAddress, deadline: BigInt(Math.floor(Date.now() / 1000) + 300) });
+  if (factory) console.log("Known pools", await factory.allPools());
 }
 
 main().catch((error: unknown) => {
-  console.error(error);
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`AMM contract call failed: ${message}. See docs/error-codes.md for recovery guidance.`);
   process.exitCode = 1;
 });

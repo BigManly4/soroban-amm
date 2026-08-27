@@ -1,4 +1,5 @@
-# AMM Contract Error Code Reference
+# Error codes
+
 
 This document provides a complete reference for every error code emitted by the
 Soroban AMM contracts across all contract crates in `contracts/`. For each code you will find:
@@ -9,10 +10,26 @@ Soroban AMM contracts across all contract crates in `contracts/`. For each code 
 - **Remedy** – actionable instructions for the caller to recover.
 
 Use the numeric code when parsing RPC responses or writing off-chain tooling.
+=======
+## Factory
 
----
+| Code | Name | Description |
+|------|------------|---------------------------------------------------------------
+| 0 | AlreadyInitialized | Factory is already initialized |
+| 1 | Unauthorized | Caller is not the admin |
+| 2 | PoolAlreadyExists | A pool for the pair already exists |
+| 3 | PoolNotFound | Pool lookup failed |
+| 4 | UnknownPool | The pool address is not a factory-deployed pool |
+| 5 | LabelTooLong | Metadata label exceeds 64 bytes |
+| 6 | InvalidOffset | Offset beyond the available pool list |
 
-## AmmPool (`contracts/amm`)
+## Concentrated Liquidity
+
+
+(TODO)
+
+## Governance
+
 
 Defined in [contracts/amm/src/lib.rs](../contracts/amm/src/lib.rs) as `AmmError`.
 
@@ -460,3 +477,6 @@ bash scripts/check_error_docs.sh
 ```
 
 CI automatically runs `make check-docs` on every pull request and push to prevent documentation drift.
+=======
+(TODO)
+
