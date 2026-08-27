@@ -40,6 +40,7 @@ A full-stack AMM protocol built on Stellar's Soroban smart contract platform. It
   - [TypeScript Client Example](#typescript-client-example)
   - [Python Client Example](#python-client-example)
 - [Off-chain Simulator](#off-chain-simulator)
+- [Deployment Runbook](docs/deployment-runbook.md)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Changelog](#changelog)
@@ -694,15 +695,17 @@ The script deploys fresh contracts, funds a test account, adds liquidity, swaps,
 
 ### Automated Deployment
 
-The fastest way to deploy a full AMM environment (Token A, Token B, LP Token, and AMM Pool) to testnet is using the provided deployment script:
+The fastest way to deploy the full protocol (all 18 contracts) to testnet or mainnet is using the provided deployment script. For prerequisites, deployment order, per-contract parameters, verification, upgrades, and emergency procedures, see the **[Deployment Runbook](docs/deployment-runbook.md)**.
 
 ```sh
-./scripts/deploy.sh [network]
+./scripts/deploy.sh [network] [--only factory,pools] [--skip staking] [--force]
 ```
 
-- **network**: Optional target network (defaults to `testnet`).
-- The script builds contracts, generates/funds a deployer account, deploys all contracts, and initialises them.
-- Deployed contract IDs are printed to the console and saved to `.soroban-amm.deploy.env`.
+- **network**: Optional target network (defaults to `testnet`). Also reads `$NETWORK` / `$STELLAR_NETWORK`.
+- **--only / --skip**: Deploy a subset of contracts (comma-separated names). Useful for incremental or single-contract redeploys.
+- **--force**: Re-deploy even if an address is already persisted; without it, re-running is a no-op and a killed run resumes where it left off.
+- The script builds `wasm32v1-none` artifacts, generates/funds a deployer account if needed, uploads WASM hashes, deploys and initializes every contract in dependency order, and verifies each initialization by reading state back.
+- Deployed contract IDs and WASM hashes are printed to the console and persisted to `.soroban-amm.deploy.env` incrementally (every address as it is created).
 
 ### ABI Schema
 
