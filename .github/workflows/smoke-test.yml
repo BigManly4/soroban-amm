@@ -25,7 +25,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install Stellar CLI
-        uses: stellar/stellar-cli@v23.0.1
+        uses: stellar/stellar-cli@v27.1.0
 
       - name: Import smoke test identity
         shell: bash
