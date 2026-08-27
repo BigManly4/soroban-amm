@@ -3,14 +3,14 @@
 Every event emitted by the AMM, CL, governance, factory (and any future
 contract that adopts the pattern) carries a `schema_version: u32`
 field. Off-chain consumers (GraphQL indexer, health dashboard, any
-WebSocket subscriber) read this field BEFORE decoding the rest of the
-payload so an unexpected version can be quarantined rather than
+WebSocket subscriber) read this field BEFORe decoding the rest of
+the payload so an unexpected version can be quarantined rather than
 silently misinterpreted.
 
 ## How it's emitted
 
-Every emit site uses the `soroban_amm_sdk::emit_versioned_event!` macro
-instead of `env.events().publish(...)`:
+Every emit site uses the `soroban_amm_sdk::emit_versioned_event!`
+macro instead of `env.events().publish(...)`:
 
 ```rust
 // Before:
@@ -31,13 +31,13 @@ The macro expands to:
 
 ```rust
 env.events().publish(
-    /* topic */ (Symbol::new(&env, "swap"), trader.clone()),
-    /* data  */ (soroban_amm_sdk::EVENT_SCHEMA_VERSION, (token_in, amount_in, token_out, amount_out)),
-);
+    /* topic */ (Symbol::new( &env, "swap"), trader.clone()),
+    /* data  */ (soroban_amm_sdk::EVENT_SCHEMA_VERSION, (token_in, amount_in, token_out, amount_out)),);
+
 ```
 
 So the on-wire shape is `(version: u32, original_payload)`. **Topic is
-unchanged** — consumers can keep filtering by event name + author the
+unchanged** -- consumers can keep filtering by event name + author the
 way they always have.
 
 ## How consumers decode
@@ -74,13 +74,13 @@ shape changes:
 Don't bump for:
 
 - Adding a new event type (consumers can ignore unknown topics)
-- Changing event topic content (topic is separate from payload — a
+- Changing event topic content (topic is separate from payload a
   topic change is independently observable)
 
 ## Versioning is global, not per-event
 
 One `EVENT_SCHEMA_VERSION` covers every contract event in the
-workspace. The alternative — per-event version — was rejected because:
+workspace. The alternative -- per-event version -- was rejected because:
 
 1. Consumer state machines would have to track N independent version
    sequences, one per event type.
@@ -92,7 +92,7 @@ workspace. The alternative — per-event version — was rejected because:
 The cost is that bumping any event's payload bumps the "version" for
 every event, even unchanged ones. That's fine: consumers see the
 unchanged payload as the same bytes, just with a different `version`
-prefix — easy to validate during the upgrade window.
+prefix -- easy to validate during the upgrade window.
 
 ## Affected contracts
 
@@ -103,11 +103,22 @@ This PR migrates every existing emit site in:
 - `contracts/governance/src/lib.rs` (5 sites)
 - `contracts/factory/src/lib.rs` (6 sites)
 
-Total: **30 sites migrated**.
+Total: *30 sites migrated**.
 
 `contracts/staking/src/lib.rs` was inspected but has no event emissions
-yet — once it starts emitting it should adopt the macro from day one.
+yet -- once it starts emitting it should adopt the macro from day one.
 
 Test files in each of those crates were updated to decode the
-versioned payload shape; see `__ver_N` locals + `assert_eq!(version,
+versioned payload shape; see `__ver_N_locals+ assert_eq(!version,
 EVENT_SCHEMA_VERSION)` assertions added by `migrate_tests.py`.
+
+## New events in this change
+
+The factory now emits two additional events:
+
+- `pool_meta`: emitted when pool metadata is created or updated. Payload:
+  `(schema_version: u32, (label: String, category: PoolCategory, created_at: u64, created_by: Address, verified: bool))`.
+- `pool_ver`: emitted when the verified flag changes. Payload:
+  `(schema_version: u32, verified: bool)`.
+
+Consumers should ignore unknown topics; existing versioning rules apply.
