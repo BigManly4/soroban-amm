@@ -257,6 +257,48 @@ pub struct CircuitBreakerConfig {
     pub tripped: bool,
 }
 
+// ── Reentrancy guard ─────────────────────────────────────────────────────────
+
+/// RAII guard for the pool-wide reentrancy lock (`DataKey::Locked`).
+///
+/// `ReentrancyGuard::acquire` sets the lock and returns a guard; the lock is
+/// released by the guard's `Drop` impl, which runs when the guard goes out
+/// of scope — on the `Ok` return path, on every `Err` return path (including
+/// every early return via `?`), and on a panic. This is deliberately chosen
+/// over hand-placing a release call at each exit: a function with several
+/// `?`-chained fallible steps only has to bind `let _guard = ...;` once at
+/// the top, and there is no exit path left for a future edit to miss.
+///
+/// Every fund-moving entry point (`swap`, `swap_exact_out`, `swap_fot`,
+/// `add_liquidity`, `add_liquidity_fot`, `remove_liquidity`,
+/// `remove_liquidity_one_sided`, `flash_loan`, `withdraw_protocol_fees`,
+/// `emergency_withdraw`) acquires one of these before doing anything else
+/// that could be observed by a reentrant call, and none of these functions
+/// call each other internally, so a guard is never acquired twice in the
+/// same call stack during legitimate use.
+struct ReentrancyGuard<'a> {
+    env: &'a Env,
+}
+
+impl<'a> ReentrancyGuard<'a> {
+    /// Acquires the lock, or returns `Err(AmmError::Reentrant)` if it is
+    /// already held — including when held by an enclosing invocation of this
+    /// very function, reached via a cross-contract callback.
+    fn acquire(env: &'a Env) -> Result<Self, AmmError> {
+        if AmmPool::lock_held(env) {
+            return Err(AmmError::Reentrant);
+        }
+        env.storage().instance().set(&DataKey::Locked, &true);
+        Ok(Self { env })
+    }
+}
+
+impl<'a> Drop for ReentrancyGuard<'a> {
+    fn drop(&mut self) {
+        self.env.storage().instance().set(&DataKey::Locked, &false);
+    }
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -472,6 +514,8 @@ impl AmmPool {
     /// Admin-only, callable via a timed governance proposal.
     pub fn emergency_withdraw(env: Env, to: Address) -> Result<(), AmmError> {
         Self::extend_ttl(&env);
+        // Acquire the reentrancy lock before any external transfer below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -532,15 +576,70 @@ impl AmmPool {
         Ok(())
     }
 
-    /// Return `true` while a flash loan is executing on this pool.
+    /// Return `true` while the reentrancy lock is held.
     ///
-    /// During this window all state-mutating functions (`swap`,
-    /// `add_liquidity`, `remove_liquidity`, `flash_loan`) will reject calls
-    /// with `AmmError::Reentrant`. This is a read-only diagnostic; callers
-    /// should not rely on this for security checks — the guard is enforced
-    /// internally by `enter_lock`.
+    /// The lock is held for the duration of every fund-moving entry point —
+    /// `swap`, `swap_exact_out`, `swap_fot`, `add_liquidity`,
+    /// `add_liquidity_fot`, `remove_liquidity`, `remove_liquidity_one_sided`,
+    /// `flash_loan`, `withdraw_protocol_fees`, and `emergency_withdraw` —
+    /// not only `flash_loan`. Any of them will reject a reentrant call with
+    /// `AmmError::Reentrant` while this is `true`. This is a read-only
+    /// diagnostic; the guard itself is enforced internally by
+    /// `ReentrancyGuard::acquire`.
+    pub fn is_locked(env: Env) -> bool {
+        Self::lock_held(&env)
+    }
+
+    /// Deprecated alias for [`Self::is_locked`], kept for ABI compatibility.
+    /// The name described only the flash-loan holder of the lock; every
+    /// fund-moving entry point now holds it while executing.
     pub fn flash_loan_locked(env: Env) -> bool {
-        Self::is_locked(&env)
+        Self::is_locked(env)
+    }
+
+    /// Admin-only, multisig-gated last resort to clear a stranded lock.
+    ///
+    /// The lock is released automatically by `ReentrancyGuard`'s `Drop` on
+    /// every return path of every guarded function, so this should never be
+    /// needed in practice. It exists purely as recovery if some future
+    /// change reintroduces a stranded lock. When a multisig is configured
+    /// (`quorum > 0`), at least `quorum` of the configured signers passed in
+    /// `callers` must each authorize this call; otherwise the pool admin
+    /// alone must authorize it.
+    pub fn force_unlock(env: Env, callers: soroban_sdk::Vec<Address>) -> Result<(), AmmError> {
+        Self::extend_ttl(&env);
+        let quorum: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MultisigQuorum)
+            .unwrap_or(0);
+        if quorum == 0 {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            admin.require_auth();
+        } else {
+            let signers: soroban_sdk::Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::MultisigSigners)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+            let mut approved: u32 = 0;
+            for caller in callers.iter() {
+                if signers.contains(&caller) {
+                    caller.require_auth();
+                    approved += 1;
+                }
+            }
+            if approved < quorum {
+                return Err(AmmError::Unauthorized);
+            }
+        }
+        env.storage().instance().set(&DataKey::Locked, &false);
+        soroban_amm_sdk::emit_versioned_event!(
+            env,
+            (Symbol::new(&env, "force_unlock"),),
+            (env.ledger().timestamp(),)
+        );
+        Ok(())
     }
 
     // ── Circuit breaker ───────────────────────────────────────────────────────
@@ -1249,38 +1348,17 @@ impl AmmPool {
 
     // ── Reentrancy guard ──────────────────────────────────────────────────────
 
-    /// Return `true` if a flash loan is currently executing on this contract.
+    /// Return `true` if the reentrancy lock is currently held.
     ///
-    /// Any state-mutating entry point that could be exploited via a reentrant
-    /// callback (swap, add_liquidity, remove_liquidity, flash_loan) calls this
-    /// before proceeding. The lock is stored in instance storage so it is
-    /// visible to all cross-contract calls within the same transaction.
-    fn is_locked(env: &Env) -> bool {
+    /// The lock is stored in instance storage so it is visible to every
+    /// cross-contract call within the same transaction, including a
+    /// callback made by an external token or flash-loan receiver contract
+    /// back into this pool.
+    fn lock_held(env: &Env) -> bool {
         env.storage()
             .instance()
             .get(&DataKey::Locked)
             .unwrap_or(false)
-    }
-
-    /// Acquire the reentrancy lock.
-    ///
-    /// Returns `Err(AmmError::Reentrant)` if the lock is already held,
-    /// preventing a flash-loan receiver from calling back into the pool.
-    fn enter_lock(env: &Env) -> Result<(), AmmError> {
-        if Self::is_locked(env) {
-            return Err(AmmError::Reentrant);
-        }
-        env.storage().instance().set(&DataKey::Locked, &true);
-        Ok(())
-    }
-
-    /// Release the reentrancy lock.
-    ///
-    /// Must be called on every successful return path after `enter_lock`.
-    /// On error paths the Soroban runtime reverts all storage writes
-    /// (including the lock), so an explicit release is not required there.
-    fn exit_lock(env: &Env) {
-        env.storage().instance().set(&DataKey::Locked, &false);
     }
 
     // ── TWAP ──────────────────────────────────────────────────────────────────
@@ -1402,10 +1480,11 @@ impl AmmPool {
         if Self::is_paused(env.clone()) {
             return Err(AmmError::Paused);
         }
-        // Block reentrant calls from flash loan receivers.
-        if Self::is_locked(&env) {
-            return Err(AmmError::Reentrant);
-        }
+        // Acquire the reentrancy lock for the duration of this call; a
+        // reentrant call arriving via a token/receiver callback is rejected
+        // here with `Reentrant`, and the lock is released automatically
+        // when `_guard` drops on any return path below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         provider.require_auth();
         if amount_a <= 0 || amount_b <= 0 {
             return Err(AmmError::ZeroAmount);
@@ -1534,10 +1613,11 @@ impl AmmPool {
         if Self::is_paused(env.clone()) {
             return Err(AmmError::Paused);
         }
-        // Block reentrant calls from flash loan receivers.
-        if Self::is_locked(&env) {
-            return Err(AmmError::Reentrant);
-        }
+        // Acquire the reentrancy lock for the duration of this call; a
+        // reentrant call arriving via a token/receiver callback is rejected
+        // here with `Reentrant`, and the lock is released automatically
+        // when `_guard` drops on any return path below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         provider.require_auth();
         if shares <= 0 {
             return Err(AmmError::ZeroAmount);
@@ -1635,10 +1715,11 @@ impl AmmPool {
         if Self::is_paused(env.clone()) {
             return Err(AmmError::Paused);
         }
-        // Block reentrant calls from flash loan receivers.
-        if Self::is_locked(&env) {
-            return Err(AmmError::Reentrant);
-        }
+        // Acquire the reentrancy lock for the duration of this call; a
+        // reentrant call arriving via a token/receiver callback is rejected
+        // here with `Reentrant`, and the lock is released automatically
+        // when `_guard` drops on any return path below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         provider.require_auth();
         if shares <= 0 {
             return Err(AmmError::ZeroAmount);
@@ -1847,10 +1928,11 @@ impl AmmPool {
         if Self::is_paused(env.clone()) {
             return Err(AmmError::Paused);
         }
-        // Block reentrant calls from flash loan receivers.
-        if Self::is_locked(&env) {
-            return Err(AmmError::Reentrant);
-        }
+        // Acquire the reentrancy lock for the duration of this call; a
+        // reentrant call arriving via a token/receiver callback is rejected
+        // here with `Reentrant`, and the lock is released automatically
+        // when `_guard` drops on any return path below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         trader.require_auth();
         if amount_in <= 0 {
             return Err(AmmError::ZeroAmount);
@@ -2008,10 +2090,11 @@ impl AmmPool {
         if Self::is_paused(env.clone()) {
             return Err(AmmError::Paused);
         }
-        // Block reentrant calls from flash loan receivers.
-        if Self::is_locked(&env) {
-            return Err(AmmError::Reentrant);
-        }
+        // Acquire the reentrancy lock for the duration of this call; a
+        // reentrant call arriving via a token/receiver callback is rejected
+        // here with `Reentrant`, and the lock is released automatically
+        // when `_guard` drops on any return path below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         trader.require_auth();
         if amount_out <= 0 {
             return Err(AmmError::ZeroAmount);
@@ -2132,6 +2215,8 @@ impl AmmPool {
     /// Returns `(fee_a_withdrawn, fee_b_withdrawn)`.
     pub fn withdraw_protocol_fees(env: Env) -> Result<(i128, i128), AmmError> {
         Self::extend_ttl(&env);
+        // Acquire the reentrancy lock before any external transfer below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         let fee_recipient: Address = env
             .storage()
             .instance()
@@ -2177,12 +2262,14 @@ impl AmmPool {
     /// Borrow pool liquidity and repay it plus a fee during the receiver callback.
     ///
     /// # Reentrancy safety
-    /// This function acquires a reentrancy lock before calling the external
-    /// `on_flash_loan` callback and holds it for the duration of that call.
-    /// Any attempt by the receiver to call back into `swap`, `add_liquidity`,
-    /// `remove_liquidity`, or `flash_loan` on this same pool will fail with
-    /// `AmmError::Reentrant`. The lock is released only after repayment is
-    /// verified, ensuring pool state cannot be manipulated via callbacks.
+    /// This function acquires the pool-wide reentrancy lock before calling
+    /// the external `on_flash_loan` callback and holds it for the duration
+    /// of that call — the same lock every other fund-moving entry point
+    /// (`swap`, `add_liquidity`, `remove_liquidity`, `flash_loan`, and the
+    /// rest) now acquires. Any attempt by the receiver to call back into any
+    /// of them on this same pool will fail with `AmmError::Reentrant`. The
+    /// lock is released by `ReentrancyGuard`'s `Drop` on every return path —
+    /// success, repayment failure, or any other error — not only on success.
     pub fn flash_loan(
         env: Env,
         receiver: Address,
@@ -2199,10 +2286,12 @@ impl AmmPool {
         }
 
         let (reserve_a, reserve_b) = Self::checkpoint_oracles(&env);
-        // Acquire the reentrancy lock before any external call.
-        // This prevents the receiver's on_flash_loan callback from calling
-        // back into swap / add_liquidity / remove_liquidity / flash_loan.
-        Self::enter_lock(&env)?;
+        // Acquire the reentrancy lock before any external call. This
+        // prevents the receiver's on_flash_loan callback from calling back
+        // into any fund-moving entry point on this pool, and is released
+        // automatically (including on every error path below) when `_guard`
+        // drops.
+        let _guard = ReentrancyGuard::acquire(&env)?;
 
         // Circuit breaker check before borrowing funds.
         Self::check_circuit_breaker(&env)?;
@@ -2278,9 +2367,8 @@ impl AmmPool {
             (amount_a, amount_b, fee_a, fee_b)
         );
 
-        // Release the lock only on the success path; on error paths Soroban
-        // reverts all storage writes (including the lock) automatically.
-        Self::exit_lock(&env);
+        // `_guard` releases the lock when it drops here on the success path
+        // (and would release it identically had any `?` above returned early).
         Ok((fee_a, fee_b))
     }
 
@@ -2551,9 +2639,11 @@ impl AmmPool {
         if Self::is_paused(env.clone()) {
             return Err(AmmError::Paused);
         }
-        if Self::is_locked(&env) {
-            return Err(AmmError::Reentrant);
-        }
+        // Acquire the reentrancy lock for the duration of this call; a
+        // reentrant call arriving via a token/receiver callback is rejected
+        // here with `Reentrant`, and the lock is released automatically
+        // when `_guard` drops on any return path below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         trader.require_auth();
         if amount_in <= 0 {
             return Err(AmmError::ZeroAmount);
@@ -2709,9 +2799,11 @@ impl AmmPool {
         if Self::is_paused(env.clone()) {
             return Err(AmmError::Paused);
         }
-        if Self::is_locked(&env) {
-            return Err(AmmError::Reentrant);
-        }
+        // Acquire the reentrancy lock for the duration of this call; a
+        // reentrant call arriving via a token/receiver callback is rejected
+        // here with `Reentrant`, and the lock is released automatically
+        // when `_guard` drops on any return path below.
+        let _guard = ReentrancyGuard::acquire(&env)?;
         provider.require_auth();
         if amount_a <= 0 || amount_b <= 0 {
             return Err(AmmError::ZeroAmount);

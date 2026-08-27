@@ -111,3 +111,10 @@ yet — once it starts emitting it should adopt the macro from day one.
 Test files in each of those crates were updated to decode the
 versioned payload shape; see `__ver_N` locals + `assert_eq!(version,
 EVENT_SCHEMA_VERSION)` assertions added by `migrate_tests.py`.
+
+## Update (#698)
+
+`contracts/amm/src/lib.rs` gained one more versioned emit site: the new
+admin/multisig-gated `force_unlock` recovery function emits a
+`force_unlock` event through `emit_versioned_event!`, consistent with every
+other state-mutating call in this contract.
