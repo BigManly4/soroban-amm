@@ -74,6 +74,8 @@ Defined in [contracts/factory/src/lib.rs](../contracts/factory/src/lib.rs) as `F
 | 4 | `ClPoolAlreadyExists` | `create_cl_pool` was called for a pair/fee that already has a CL pool. | Use `get_cl_pool` to retrieve the existing address. |
 | 5 | `ClWasmNotSet` | Tried to create a CL pool before the CL WASM hash was registered via `set_cl_wasm`. | Call `set_cl_wasm` with the uploaded CL contract hash first. |
 | 6 | `Unauthorized` | Non-admin called an admin-only factory function. | Use the factory admin keypair. |
+| 7 | `PoolNotFound` | A pool-address argument referenced a pool the factory did not deploy. | Verify the address with `all_pools()` or `get_pool_tokens` before calling. |
+| 8 | `LabelTooLong` | A metadata `label` exceeded the 64-byte maximum. | Use a label of at most 64 UTF-8 bytes. |
 
 ---
 
