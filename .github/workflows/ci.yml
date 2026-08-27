@@ -85,3 +85,63 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./... -count=1
+
+  npm-packages:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: packages/sdk
+            test_cmd: npm test -- --passWithNoTests
+          - dir: packages/ui-components
+            test_cmd: npm test -- --passWithNoTests
+          - dir: packages/ts-advanced-client
+            test_cmd: npm test
+          - dir: services/graphql-api
+            # No runnable test suite yet (the "test" script points at a
+            # dist file that isn't emitted) - build coverage only for now.
+            test_cmd: echo "no test suite configured yet"
+          - dir: services/webhook-streamer
+            test_cmd: npm test
+          - dir: services/health-dashboard
+            test_cmd: npm test
+          - dir: examples/client
+            test_cmd: npm test
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install
+      - name: Build
+        run: npm run build
+      - name: Test
+        run: ${{ matrix.test_cmd }}
+
+  python-examples:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: examples/python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -q
