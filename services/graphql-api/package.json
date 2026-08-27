@@ -15,7 +15,7 @@
     "graphql-subscriptions": "^2.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.2.0",
     "tsx": "^4.19.0",
     "typescript": "^7.0.2"
   }
