@@ -7,3 +7,4 @@ __pycache__/
 *.backup
 *.bak
 *.orig
+contracts/incentive_campaigns/test_snapshots
