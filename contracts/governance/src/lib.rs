@@ -69,6 +69,11 @@ pub enum GovernanceError {
     InsufficientSnapshotBal = 31,
     VetoMultisigNotSet = 32,
     NoPendingAdmin = 33,
+    /// The `UpdateFactoryGlobalFee` proposal's `offset` / `limit` window does
+    /// not cover every pool registered in the factory.  Execution is rejected
+    /// so the proposal cannot be permanently marked executed while only a
+    /// partial set of pools was updated.
+    PartialFactoryUpdate = 34,
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -327,7 +332,8 @@ pub trait LpTokenInterface {
     fn balance_at(env: Env, id: Address, ledger: u32) -> i128;
     fn total_supply(env: Env) -> i128;
     fn lock(env: Env, holder: Address, amount: i128);
-    fn unlock(env: Env, holder: Address, amount: i128);
+    /// `locker` is the contract that originally locked the tokens (issue #556 fix).
+    fn unlock(env: Env, holder: Address, locker: Address, amount: i128);
 }
 
 // ── AMM client ────────────────────────────────────────────────────────────────
@@ -349,6 +355,8 @@ pub trait AmmPoolInterface {
 pub trait FactoryInterface {
     fn set_treasury(env: Env, admin: Address, treasury: Address, global_protocol_fee_bps: i128);
     fn set_global_fee_paginated(env: Env, admin: Address, offset: u32, limit: u32) -> u32;
+    /// Return the total number of AMM pools registered in the factory.
+    fn get_pool_count(env: Env) -> u64;
 }
 
 // ── POL Vesting client ────────────────────────────────────────────────────────
@@ -482,7 +490,8 @@ impl Governance {
     }
 
     /// Admin-only: update the timelock delay between vote end and execution.
-    /// A delay of 0 means execution is allowed immediately after the voting period ends.
+    /// Execution is always gated by at least the veto window (24h), so even
+    /// a delay of 0 does not allow execution before the veto window expires.
     pub fn set_timelock_delay(env: Env, new_delay: u64) -> Result<(), GovernanceError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -585,7 +594,14 @@ impl Governance {
                     return Err(GovernanceError::InvalidFeeBps);
                 }
             }
-            ProposalKind::UpdateFactoryGlobalFee(_) => {}
+            ProposalKind::UpdateFactoryGlobalFee(params) => {
+                // offset must be zero (all pools must be covered from the start)
+                // and limit must be non-zero.  These are cheap eager checks that
+                // catch obviously invalid proposals before they enter voting.
+                if params.offset != 0 || params.limit == 0 {
+                    return Err(GovernanceError::PartialFactoryUpdate);
+                }
+            }
             ProposalKind::CreatePolVesting(_) => {}
             ProposalKind::PauseClPool(_) => {}
             ProposalKind::UnpauseClPool(_) => {}
@@ -631,7 +647,7 @@ impl Governance {
 
         let now = env.ledger().timestamp();
         let vote_end = now + voting_period;
-        let execute_after = vote_end + timelock;
+        let execute_after = vote_end + timelock.max(VETO_WINDOW_SECS);
         // Execution window: at least one voting period even when timelock is 0.
         let expires_at = execute_after + timelock.max(voting_period);
 
@@ -641,7 +657,15 @@ impl Governance {
             .get(&DataKey::ProposalCount)
             .unwrap();
 
-        let snapshot_ledger = env.ledger().sequence();
+        // Snapshot the last already-closed ledger, never the current still-open
+        // one. LpToken::write_checkpoint overwrites (not appends) the checkpoint
+        // when a balance change lands in the same ledger, so using the current
+        // ledger would fold any mint/transfer included in this same ledger —
+        // even in a later transaction — into balance_at(holder, snapshot_ledger),
+        // letting an attacker inflate their snapshotted voting power. Any change
+        // at the current ledger or later is written at a ledger strictly greater
+        // than this snapshot and is therefore excluded.
+        let snapshot_ledger = env.ledger().sequence().saturating_sub(1);
 
         let proposal = Proposal {
             id,
@@ -735,12 +759,26 @@ impl Governance {
             return Err(GovernanceError::NoVotingPower);
         }
 
+        let record = match choice {
+            Vote::For => VoteRecord::VotedFor,
+            Vote::Against => VoteRecord::VotedAgainst,
+            Vote::Abstain => VoteRecord::VotedAbstain,
+        };
+
         for i in 0..lock_accounts.len() {
             let (account, amount) = lock_accounts.get(i).unwrap();
             lp_client.lock(&account, &amount);
             let lock_key = DataKey::LockedVote(proposal_id, account.clone());
             env.storage().persistent().set(&lock_key, &amount);
             Self::bump_key_ttl(&env, &lock_key);
+
+            // Mark every aggregated holder (delegators included) as having
+            // voted on this proposal so they cannot be locked a second time
+            // via a later vote() call, and so they cannot vote directly or
+            // be re-aggregated after undelegating mid-proposal.
+            let holder_voted_key = DataKey::HasVoted(proposal_id, account.clone());
+            env.storage().persistent().set(&holder_voted_key, &record);
+            Self::bump_key_ttl(&env, &holder_voted_key);
         }
 
         match choice {
@@ -757,14 +795,6 @@ impl Governance {
 
         env.storage().persistent().set(&proposal_key, &proposal);
         Self::bump_key_ttl(&env, &proposal_key);
-
-        let record = match choice {
-            Vote::For => VoteRecord::VotedFor,
-            Vote::Against => VoteRecord::VotedAgainst,
-            Vote::Abstain => VoteRecord::VotedAbstain,
-        };
-        env.storage().persistent().set(&voted_key, &record);
-        Self::bump_key_ttl(&env, &voted_key);
 
         soroban_amm_sdk::emit_versioned_event!(
             env,
@@ -861,6 +891,20 @@ impl Governance {
             ProposalKind::UpdateFactoryGlobalFee(params) => {
                 let self_addr = env.current_contract_address();
                 let factory_client = FactoryClient::new(&env, &params.factory);
+                // Ensure the pagination window covers every pool registered in
+                // the factory.  If it does not, the transaction is aborted so
+                // the proposal cannot be marked executed while pools remain
+                // untouched.
+                let pool_count: u64 = factory_client.get_pool_count();
+                let window_end: u64 = (params.offset as u64)
+                    .saturating_add(params.limit as u64);
+                // Both conditions must hold:
+                //  - offset == 0: the window starts from the first pool
+                //  - window_end >= pool_count: the window reaches the last pool
+                // A non-zero offset would silently skip the leading pools.
+                if params.offset != 0 || window_end < pool_count {
+                    return Err(GovernanceError::PartialFactoryUpdate);
+                }
                 let _updated = factory_client.set_global_fee_paginated(
                     &self_addr,
                     &params.offset,
@@ -1021,7 +1065,10 @@ impl Governance {
         }
 
         let lp_token: Address = env.storage().instance().get(&DataKey::LpToken).unwrap();
-        LpTokenClient::new(&env, &lp_token).unlock(&voter, &locked);
+        // Issue #556: pass `self_addr` as the locker so the LP token authorises this
+        // contract, even after Admin has rotated `set_locker` to a different contract.
+        let self_addr = env.current_contract_address();
+        LpTokenClient::new(&env, &lp_token).unlock(&voter, &self_addr, &locked);
         env.storage().persistent().remove(&lock_key);
 
         soroban_amm_sdk::emit_versioned_event!(
@@ -1282,7 +1329,10 @@ impl Governance {
         if decay_rate == 0 {
             return base;
         }
-        let now = env.ledger().timestamp();
+        // Freeze decay at vote_end: once voting closes the tally is final, so
+        // the required quorum must not keep climbing based on when execute(),
+        // veto(), or proposal_status() happen to be called afterward.
+        let now = env.ledger().timestamp().min(proposal.vote_end);
         let days_open = if now > proposal.vote_start {
             (now - proposal.vote_start) / 86_400
         } else {
@@ -1325,13 +1375,20 @@ impl Governance {
         locks: &mut Vec<(Address, i128)>,
         depth: u32,
     ) -> Result<(), GovernanceError> {
+        // Depth is a traversal bound, not a validity check: `delegate` already
+        // rejects cycles, so a chain longer than MAX_DELEGATION_DEPTH is simply a
+        // long honest chain. Stop walking instead of erroring, otherwise the
+        // terminal delegatee could never vote at all.
         if depth > MAX_DELEGATION_DEPTH {
-            return Err(GovernanceError::DelegationCycle);
+            return Ok(());
         }
-        let power = Self::snapshot_voting_power(lp_client, holder, proposal)?;
-        if power > 0 {
-            *total += power;
-            locks.push_back((holder.clone(), power));
+        let voted_key = DataKey::HasVoted(proposal.id, holder.clone());
+        if !env.storage().persistent().has(&voted_key) {
+            let power = Self::snapshot_voting_power(lp_client, holder, proposal)?;
+            if power > 0 {
+                *total += power;
+                locks.push_back((holder.clone(), power));
+            }
         }
         let count_key = DataKey::DelegatorCount(holder.clone());
         let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -2021,7 +2078,7 @@ mod tests {
     // ── Issue #188: set_timelock_delay ────────────────────────────────────────
 
     #[test]
-    fn test_timelock_delay_zero_allows_immediate_execution() {
+    fn test_timelock_delay_zero_respects_veto_window() {
         let s = setup_suite(30);
         let gov = GovernanceClient::new(&s.env, &s.gov_addr);
 
@@ -2030,7 +2087,7 @@ mod tests {
         mint_lp(&s, &lp1, 600);
         mint_lp(&s, &lp2, 400);
 
-        // Set timelock delay to 0 so execution is allowed immediately after vote_end.
+        // Set timelock delay to 0, but execute_after should still respect veto window.
         gov.set_timelock_delay(&0_u64);
         let params = gov.get_params();
         assert_eq!(params.timelock_secs, 0);
@@ -2040,8 +2097,8 @@ mod tests {
         gov.vote(&lp2, &pid, &Vote::For);
 
         let proposal = gov.get_proposal(&pid);
-        // With timelock = 0: execute_after = vote_end, expires_at = vote_end + voting_period.
-        // Jump to execute_after + 1 to satisfy now >= execute_after.
+        // With timelock = 0: execute_after = vote_end + VETO_WINDOW_SECS (clamped).
+        // Jump past the veto window.
         s.env.ledger().set_timestamp(proposal.execute_after + 1);
 
         gov.execute(&pid);
@@ -2164,6 +2221,34 @@ mod tests {
     }
 
     #[test]
+    fn test_propose_snapshot_excludes_same_ledger_mint() {
+        // Regression for #559: a mint landing in the *same* ledger as propose()
+        // (even in a later transaction) must not count toward snapshot voting
+        // power, because the snapshot is taken as of the last closed ledger.
+        let s = setup_suite(30);
+        let gov = GovernanceClient::new(&s.env, &s.gov_addr);
+
+        let proposer = Address::generate(&s.env);
+        let attacker = Address::generate(&s.env);
+        mint_lp(&s, &proposer, 600);
+
+        // Advance to a real (non-genesis) ledger and create the proposal there.
+        s.env.ledger().with_mut(|l| l.sequence_number = 100);
+        let pid = gov.propose(&proposer, &ProposalKind::UpdateFee(50));
+
+        // Same ledger, later transaction: attacker acquires LP.
+        mint_lp(&s, &attacker, 1_000);
+
+        // The same-ledger acquisition is excluded from the snapshot.
+        assert_eq!(gov.get_snapshot_balance(&pid, &attacker), 0);
+        assert!(gov.try_vote(&attacker, &pid, &Vote::For).is_err());
+
+        // The proposer, who held their balance in an earlier closed ledger,
+        // retains their legitimate voting power.
+        assert_eq!(gov.get_snapshot_balance(&pid, &proposer), 600);
+    }
+
+    #[test]
     fn test_delegation_aggregates_voting_power() {
         let s = setup_suite(30);
         let gov = GovernanceClient::new(&s.env, &s.gov_addr);
@@ -2182,6 +2267,41 @@ mod tests {
 
         let p = gov.get_proposal(&pid);
         assert_eq!(p.votes_for, 600);
+    }
+
+    #[test]
+    fn test_delegate_after_direct_vote_does_not_double_lock_or_double_count() {
+        let s = setup_suite(30);
+        let gov = GovernanceClient::new(&s.env, &s.gov_addr);
+
+        let a = Address::generate(&s.env);
+        let b = Address::generate(&s.env);
+        let proposer = Address::generate(&s.env);
+        mint_lp(&s, &a, 300);
+        mint_lp(&s, &b, 300);
+        mint_lp(&s, &proposer, 400);
+
+        let pid = gov.propose(&proposer, &ProposalKind::UpdateFee(50));
+
+        // B votes directly first, locking their own snapshot power.
+        gov.vote(&b, &pid, &Vote::For);
+        assert_eq!(gov.get_proposal(&pid).votes_for, 300);
+
+        // B then delegates to A while the proposal is still open. Nothing
+        // should block this, but A's later vote must not re-lock or
+        // re-count B's already-locked power.
+        gov.delegate(&b, &a);
+
+        // A votes; this must not panic (double lock of B's balance) and
+        // must only add A's own power, since B already voted.
+        gov.vote(&a, &pid, &Vote::For);
+
+        let p = gov.get_proposal(&pid);
+        assert_eq!(
+            p.votes_for,
+            300 + 300,
+            "B's power must not be counted twice"
+        );
     }
 
     #[test]
@@ -2391,9 +2511,10 @@ mod tests {
 
         let proposal = gov.get_proposal(&pid);
         s.env.ledger().set_timestamp(proposal.execute_after + 1);
-        // At execute_after (~9 days from vote_start), effective quorum = 1000 + 9*100 = 1900.
-        // 1000 total votes >= quorum_threshold (1000*1900/10000=190) so proposal passes.
-        assert_eq!(gov.get_effective_quorum(&pid), 1_900);
+        // Decay freezes at vote_end (7 days from vote_start), so effective
+        // quorum = 1000 + 7*100 = 1700 regardless of when execute() is called.
+        // 1000 total votes >= quorum_threshold (1000*1700/10000=170) so proposal passes.
+        assert_eq!(gov.get_effective_quorum(&pid), 1_700);
         gov.execute(&pid);
         assert_eq!(gov.proposal_status(&pid), ProposalStatus::Executed);
     }
@@ -2413,14 +2534,18 @@ mod tests {
         gov.vote(&lp1, &pid, &Vote::For);
 
         let proposal = gov.get_proposal(&pid);
-        // Jump 20 days from vote_start; execute_after is only ~9 days so we are past it.
-        // 20 days * 500 bps/day + 1000 base = 11000 capped at 10000.
+        // Jump 20 days from vote_start, well past vote_end (7 days) and expires_at
+        // (11 days). Decay freezes at vote_end: 7 days * 500 bps/day + 1000 base = 4500,
+        // not the 11000 (capped 10000) it would be if decay kept accruing after voting closed.
         s.env
             .ledger()
             .set_timestamp(proposal.vote_start + 20 * 86_400);
 
-        assert_eq!(gov.get_effective_quorum(&pid), 10_000);
-        assert_eq!(gov.proposal_status(&pid), ProposalStatus::Defeated);
+        assert_eq!(gov.get_effective_quorum(&pid), 4_500);
+        // Frozen quorum threshold (450) is met by the 600 votes cast, and votes_for
+        // beats votes_against, so the proposal passed quorum -- it is now Expired
+        // (never executed within the window), not Defeated.
+        assert_eq!(gov.proposal_status(&pid), ProposalStatus::Expired);
     }
 
     #[test]
@@ -2706,6 +2831,251 @@ mod tests {
             }),
         );
         assert!(r.is_err());
+    }
+
+    // ── UpdateFactoryGlobalFee regression tests ───────────────────────────────
+    //
+    // These tests verify the fix for the partial-execution bug: a proposal
+    // whose offset/limit window does not cover all factory pools must be
+    // rejected so the proposal is never marked executed while pools remain
+    // un-updated.
+
+    /// Minimal mock factory that tracks a configurable pool count and records
+    /// whether `set_global_fee_paginated` was called.  Only the three methods
+    /// declared in `FactoryInterface` are implemented; every other call would
+    /// trap, which is fine for these unit tests.
+    #[contract]
+    struct MockFactory;
+
+    #[contractimpl]
+    impl MockFactory {
+        /// Store the pool count that this mock should report.
+        pub fn set_pool_count(env: Env, count: u64) {
+            env.storage().instance().set(&Symbol::new(&env, "count"), &count);
+        }
+
+        /// Return the number of pools set via `set_pool_count`.
+        pub fn get_pool_count(env: Env) -> u64 {
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "count"))
+                .unwrap_or(0_u64)
+        }
+
+        /// Record that this was called so tests can assert it ran.
+        pub fn set_global_fee_paginated(env: Env, _admin: Address, _offset: u32, limit: u32) -> u32 {
+            let prev: u32 = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(&env, "called"))
+                .unwrap_or(0u32);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "called"), &(prev + 1));
+            limit
+        }
+
+        /// Satisfy the FactoryInterface trait; not exercised by these tests.
+        pub fn set_treasury(
+            _env: Env,
+            _admin: Address,
+            _treasury: Address,
+            _global_protocol_fee_bps: i128,
+        ) {
+        }
+
+        /// Return how many times `set_global_fee_paginated` was called.
+        pub fn call_count(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "called"))
+                .unwrap_or(0u32)
+        }
+    }
+
+    /// Suite returned by `setup_factory_gov`.
+    struct FactoryGovSuite {
+        env: Env,
+        gov_addr: Address,
+        proposer: Address,
+        factory_addr: Address,
+    }
+
+    impl FactoryGovSuite {
+        fn gov(&self) -> GovernanceClient {
+            GovernanceClient::new(&self.env, &self.gov_addr)
+        }
+        fn factory(&self) -> MockFactoryClient {
+            MockFactoryClient::new(&self.env, &self.factory_addr)
+        }
+    }
+
+    /// Helper: set up a governance + lp-token environment backed by a mock
+    /// factory that reports `pool_count` pools.
+    fn setup_factory_gov(pool_count: u64) -> FactoryGovSuite {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1_000_000);
+
+        let admin = Address::generate(&env);
+
+        // Deploy mock factory and configure its pool count.
+        let factory_addr = env.register_contract(None, MockFactory);
+        MockFactoryClient::new(&env, &factory_addr).set_pool_count(&pool_count);
+
+        // Deploy LP token.
+        let lp_addr = env.register_contract(None, LpToken);
+        token::LpTokenClient::new(&env, &lp_addr).initialize(
+            &admin,
+            &soroban_sdk::String::from_str(&env, "AMM LP"),
+            &soroban_sdk::String::from_str(&env, "ALP"),
+            &7u32,
+        );
+
+        // Deploy a bare AMM as the governance target (governance needs an amm
+        // address at initialization time).
+        let ta = env.register_stellar_asset_contract_v2(admin.clone());
+        let tb = env.register_stellar_asset_contract_v2(admin.clone());
+        let amm_addr = env.register_contract(None, AmmPool);
+        amm::AmmPoolClient::new(&env, &amm_addr).initialize(
+            &admin,
+            &ta.address(),
+            &tb.address(),
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
+        );
+
+        // Deploy and initialize governance.
+        let gov_addr = env.register_contract(None, Governance);
+        GovernanceClient::new(&env, &gov_addr).initialize(
+            &admin,
+            &amm_addr,
+            &lp_addr,
+            &(7 * 24 * 60 * 60_u64), // voting_period_secs
+            &(2 * 24 * 60 * 60_u64), // timelock_secs
+            &1_000_i128,             // quorum_bps 10%
+            &0_i128,                 // min_proposer_stake_bps (0 → anyone can propose)
+        );
+        token::LpTokenClient::new(&env, &lp_addr).set_locker(&gov_addr);
+
+        // Mint LP tokens to a proposer so they have voting power.
+        let proposer = Address::generate(&env);
+        token::LpTokenClient::new(&env, &lp_addr).mint(&proposer, &1_000_i128);
+
+        FactoryGovSuite { env, gov_addr, proposer, factory_addr }
+    }
+
+    /// propose() must reject a proposal with limit == 0.
+    #[test]
+    fn test_update_factory_global_fee_propose_rejects_zero_limit() {
+        let s = setup_factory_gov(5);
+        let gov = s.gov();
+
+        let err = gov
+            .try_propose(
+                &s.proposer,
+                &ProposalKind::UpdateFactoryGlobalFee(UpdateFactoryGlobalFeeParams {
+                    factory: s.factory_addr.clone(),
+                    offset: 0,
+                    limit: 0, // invalid: zero limit
+                }),
+            )
+            .unwrap_err()
+            .unwrap();
+
+        assert_eq!(err, GovernanceError::PartialFactoryUpdate);
+    }
+
+    /// execute() must reject a proposal whose window covers fewer pools than
+    /// the factory currently reports, leaving proposal.executed == false.
+    #[test]
+    fn test_update_factory_global_fee_execute_rejects_partial_window() {
+        let s = setup_factory_gov(10);
+        let gov = s.gov();
+
+        // Propose with limit=5, which only covers half of the 10 pools.
+        let pid = gov.propose(
+            &s.proposer,
+            &ProposalKind::UpdateFactoryGlobalFee(UpdateFactoryGlobalFeeParams {
+                factory: s.factory_addr.clone(),
+                offset: 0,
+                limit: 5, // covers pools 0-4 only; factory has 10
+            }),
+        );
+
+        gov.vote(&s.proposer, &pid, &Vote::For);
+        let proposal = gov.get_proposal(&pid);
+        s.env.ledger().set_timestamp(proposal.execute_after + 1);
+
+        // execute() must return PartialFactoryUpdate and NOT mark the proposal done.
+        let err = gov.try_execute(&pid).unwrap_err().unwrap();
+        assert_eq!(err, GovernanceError::PartialFactoryUpdate);
+
+        // The proposal must still be in Queued (not Executed) state.
+        let status = gov.proposal_status(&pid);
+        assert_eq!(status, ProposalStatus::Queued);
+
+        // set_global_fee_paginated must NOT have been called (tx rolled back).
+        let call_count = s.factory().call_count();
+        assert_eq!(call_count, 0);
+    }
+
+    /// execute() must succeed and mark the proposal executed when limit covers
+    /// all pools (offset=0, limit >= pool_count).
+    #[test]
+    fn test_update_factory_global_fee_execute_succeeds_full_coverage() {
+        let s = setup_factory_gov(3);
+        let gov = s.gov();
+
+        // Propose with limit=u32::MAX — covers all 3 pools and any future ones.
+        let pid = gov.propose(
+            &s.proposer,
+            &ProposalKind::UpdateFactoryGlobalFee(UpdateFactoryGlobalFeeParams {
+                factory: s.factory_addr.clone(),
+                offset: 0,
+                limit: u32::MAX,
+            }),
+        );
+
+        gov.vote(&s.proposer, &pid, &Vote::For);
+        let proposal = gov.get_proposal(&pid);
+        s.env.ledger().set_timestamp(proposal.execute_after + 1);
+
+        // execute() must succeed.
+        gov.execute(&pid);
+
+        // Proposal must now be marked Executed.
+        assert_eq!(gov.proposal_status(&pid), ProposalStatus::Executed);
+
+        // set_global_fee_paginated must have been called exactly once.
+        let call_count = s.factory().call_count();
+        assert_eq!(call_count, 1);
+    }
+
+    /// execute() must succeed when the factory has zero pools (empty factory is
+    /// a degenerate but valid case: any limit > 0 satisfies 0 + limit >= 0).
+    #[test]
+    fn test_update_factory_global_fee_execute_succeeds_empty_factory() {
+        let s = setup_factory_gov(0);
+        let gov = s.gov();
+
+        let pid = gov.propose(
+            &s.proposer,
+            &ProposalKind::UpdateFactoryGlobalFee(UpdateFactoryGlobalFeeParams {
+                factory: s.factory_addr.clone(),
+                offset: 0,
+                limit: 1,
+            }),
+        );
+
+        gov.vote(&s.proposer, &pid, &Vote::For);
+        let proposal = gov.get_proposal(&pid);
+        s.env.ledger().set_timestamp(proposal.execute_after + 1);
+
+        gov.execute(&pid);
+        assert_eq!(gov.proposal_status(&pid), ProposalStatus::Executed);
     }
 }
 
