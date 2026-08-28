@@ -111,3 +111,11 @@ yet — once it starts emitting it should adopt the macro from day one.
 Test files in each of those crates were updated to decode the
 versioned payload shape; see `__ver_N` locals + `assert_eq!(version,
 EVENT_SCHEMA_VERSION)` assertions added by `migrate_tests.py`.
+
+## Update (#696)
+
+`contracts/concentrated_liquidity/src/lib.rs` gained one more versioned
+emit site: `swap_exact_out` emits a `swap_out` event through
+`emit_versioned_event!` (payload shape mirrors `swap`'s `swap` event), plus
+reuses the existing `price_upd` event on a price-moving trade, consistent
+with every other state-mutating call in this contract.

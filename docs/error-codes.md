@@ -59,6 +59,20 @@ Defined in [contracts/concentrated_liquidity/src/lib.rs](../contracts/concentrat
 | 14 | `InvalidTickSpacing` | `tick_spacing ≤ 0` during initialization. | Use a positive tick spacing (common values: 1, 10, 60, 200). |
 | 15 | `TickNotInitialized` | A swap crossed into a tick that has no liquidity (never been used by any position). | Ensure positions cover the full swap range, or use a smaller swap amount. |
 | 16 | `InvalidToken` | `token_in` is not `token_a` or `token_b`. | Check `get_info()` for valid token addresses. |
+| 17 | `RangeOrderInRange` | A range order must be fully out-of-range at creation. | Choose a tick range that does not straddle the current price. |
+| 18 | `OracleDeviationExceeded` | Spot price deviated beyond `MaxOracleDeviationBps` from the configured oracle aggregator's price. | Reduce trade size, or wait for the oracle price to converge with the pool's spot price. |
+| 19 | `NftNotConfigured` | An NFT-tokenized position operation was attempted but no position-NFT contract is wired into the pool. | Configure the position-NFT contract before using token-id-based position operations. |
+| 20 | `NotNftOwner` | The caller does not currently own the position NFT for the referenced position. | Use the current NFT owner's address, or transfer the NFT first. |
+| 21 | `ExactOutNotFullyFilled` | `swap_exact_out` or `quote_exact_out` (#696) could not fill the requested `amount_out` in full before running out of initialized ticks or hitting `sqrt_price_limit_x96`. Exact-out has no meaningful partial fill. | Reduce `amount_out`, widen `sqrt_price_limit_x96`, or add liquidity to the range being traded against. |
+
+`swap_exact_out(env, sender, zero_for_one, amount_out, sqrt_price_limit_x96,
+max_amount_in, deadline)` (#696) is the mirror of `swap`: it fixes the
+*output* amount instead of the input, reverting with `SlippageExceeded` if
+the required input exceeds `max_amount_in` and with
+`ExactOutNotFullyFilled` on a partial fill. `quote_exact_out(env,
+zero_for_one, amount_out, sqrt_price_limit_x96)` is a read-only simulation
+sharing the same tick-walking core, so it can never disagree with what
+`swap_exact_out` actually charges on the same pool state.
 
 ---
 
