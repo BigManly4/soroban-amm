@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint check bench deploy e2e clean optimize
+.PHONY: build test fmt lint check check-docs bench deploy e2e clean optimize
 
 # Default target
 all: build
@@ -22,7 +22,11 @@ fmt:
 lint:
 	cargo clippy --all -- -D warnings
 
-check: fmt lint test
+check-docs:
+	bash scripts/check_error_docs.sh
+
+check: fmt lint test check-docs
+
 
 bench:
 	cargo run -p benches -- --check

@@ -236,10 +236,32 @@
                 {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      "vec": [
+                        {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        },
+                        {
+                          "vec": [
+                            {
+                              "symbol": "Amm"
+                            }
+                          ]
+                        }
+                      ]
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      "vec": [
+                        {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                        },
+                        {
+                          "vec": [
+                            {
+                              "symbol": "Amm"
+                            }
+                          ]
+                        }
+                      ]
                     }
                   ]
                 },
@@ -290,7 +312,7 @@
               }
             ],
             "data": {
-              "string": "caught panic 'PanicPool always panics' from contract function 'Symbol(obj#45)'"
+              "string": "caught panic 'PanicPool always panics' from contract function 'Symbol(obj#53)'"
             }
           }
         }

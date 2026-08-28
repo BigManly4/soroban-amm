@@ -1,8 +1,15 @@
 //! Liquidity reserve management contract.
 //!
 //! Tracks protocol-wide minimum liquidity requirements for pool pairs and
-//! exposes a `check_reserves` guard that other contracts can call before
-//! processing withdrawals or rebalancing operations.
+//! exposes a `check_reserves` read-only gate for **off-chain callers**.
+//! The contract is **not** wired into `amm::remove_liquidity` /
+//! `amm::remove_liquidity_one_sided`; `set_min_reserve` minimums are not
+//! enforced on any on-chain withdrawal path. Off-chain dashboards, bots,
+//! multisig governance, and migration scripts should invoke
+//! `check_reserves(pool)` against any candidate pool before triggering a
+//! rebalance or migration; the return value determines whether to proceed,
+//! retry, or alert. The on-chain AMM hookup is deferred to a follow-up;
+//! see issue #518.
 //!
 //! Governance is a single address that may update requirements. The address
 //! can be a multisig or DAO contract for on-chain governance.
@@ -11,7 +18,11 @@
 //!   1. Deploy this contract.
 //!   2. Call `initialize` with the governance address and the factory address.
 //!   3. Governance calls `set_min_reserve` to configure per-pair requirements.
-//!   4. Any caller uses `check_reserves` to verify a pool is compliant.
+//!   4. **Off-chain** callers query `check_reserves(pool)` to gate actions
+//!      that take liquidity out of the pool (rebalance, migration, ...).
+//!      The AMM itself does **not** call this contract on-chain; integrating
+//!      pool exits with minimum guards is the responsibility of callers
+//!      (off-chain bots, multisig governance, the off-chain router).
 //!   5. Governance may call `propose_governance` / `accept_governance` to
 //!      securely hand off control.
 
@@ -20,6 +31,13 @@
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, Address, Env, Symbol,
 };
+
+// ── Storage TTL ──────────────────────────────────────────────────────────────
+
+/// Bump per-pair requirements when their remaining TTL drops below this.
+const MIN_PERSISTENT_TTL: u32 = 172_800; // ~10 days at 5s/ledger
+/// Target TTL to extend per-pair requirements to on write.
+const PERSISTENT_TTL_BUMP_TO: u32 = 259_200; // ~15 days at 5s/ledger
 
 // ── External contract interfaces ─────────────────────────────────────────────
 
@@ -74,6 +92,8 @@ pub enum DataKey {
 pub enum ReserveManagerError {
     NoPendingGovernance = 1,
     Unauthorized = 2,
+    AlreadyInitialized = 3,
+    NegativeReserveAmount = 4,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -87,15 +107,15 @@ impl ReserveManager {
 
     /// One-time setup. `governance` is the only address permitted to call
     /// `set_min_reserve` and `transfer_governance`.
-    pub fn initialize(env: Env, governance: Address, factory: Address) {
-        assert!(
-            !env.storage().instance().has(&DataKey::Governance),
-            "already initialized"
-        );
+    pub fn initialize(env: Env, governance: Address, factory: Address) -> Result<(), ReserveManagerError> {
+        if env.storage().instance().has(&DataKey::Governance) {
+            return Err(ReserveManagerError::AlreadyInitialized);
+        }
         env.storage()
             .instance()
             .set(&DataKey::Governance, &governance);
         env.storage().instance().set(&DataKey::Factory, &factory);
+        Ok(())
     }
 
     // ── Governance ────────────────────────────────────────────────────────────
@@ -117,6 +137,10 @@ impl ReserveManager {
         env.storage()
             .instance()
             .set(&DataKey::PendingGovernance, &Some(new_governance.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "governance_proposed"),),
+            (current_governance, new_governance),
+        );
         Ok(())
     }
 
@@ -166,24 +190,34 @@ impl ReserveManager {
     /// order-independent.
     ///
     /// Set both values to 0 to remove a requirement.
-    pub fn set_min_reserve(
+    ///
+    /// Per-pair requirements are held in persistent storage so each pair is an
+    /// independent entry with its own TTL, rather than sharing the single
+    /// instance-storage blob loaded on every invocation.
+       pub fn set_min_reserve(
         env: Env,
         token_a: Address,
         token_b: Address,
         min_reserve_a: i128,
         min_reserve_b: i128,
-    ) {
+    ) -> Result<(), ReserveManagerError> {
         let gov: Address = env.storage().instance().get(&DataKey::Governance).unwrap();
         gov.require_auth();
-        assert!(min_reserve_a >= 0, "min_reserve_a must be non-negative");
-        assert!(min_reserve_b >= 0, "min_reserve_b must be non-negative");
+        if min_reserve_a < 0 || min_reserve_b < 0 {
+            return Err(ReserveManagerError::NegativeReserveAmount);
+        }
 
         let token_a_is_first = token_a < token_b;
-        let (ta, tb) = if token_a_is_first {
-            (token_a, token_b)
-        } else {
-            (token_b, token_a)
-        };
+        let (ta, tb) = Self::normalize(token_a, token_b);
+        let key = DataKey::MinReserve(ta, tb);
+
+        // Both minimums zero means "no requirement": delete the entry so it does
+        // not linger, matching the documented behaviour above.
+        if min_reserve_a == 0 && min_reserve_b == 0 {
+            env.storage().persistent().remove(&key);
+            return Ok(());
+        }
+
         let (normalized_min_a, normalized_min_b) = if token_a_is_first {
             (min_reserve_a, min_reserve_b)
         } else {
@@ -193,16 +227,18 @@ impl ReserveManager {
             min_reserve_a: normalized_min_a,
             min_reserve_b: normalized_min_b,
         };
+        env.storage().persistent().set(&key, &req);
         env.storage()
-            .instance()
-            .set(&DataKey::MinReserve(ta, tb), &req);
+            .persistent()
+            .extend_ttl(&key, MIN_PERSISTENT_TTL, PERSISTENT_TTL_BUMP_TO);
+        Ok(())
     }
 
     /// Return the minimum reserve requirement for a pair, or (0, 0) if none.
     pub fn get_min_reserve(env: Env, token_a: Address, token_b: Address) -> ReserveRequirement {
         let (ta, tb) = Self::normalize(token_a, token_b);
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::MinReserve(ta, tb))
             .unwrap_or(ReserveRequirement {
                 min_reserve_a: 0,
@@ -234,7 +270,7 @@ impl ReserveManager {
 
         let req: ReserveRequirement = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::MinReserve(ta, tb))
             .unwrap_or(ReserveRequirement {
                 min_reserve_a: 0,
@@ -358,7 +394,10 @@ mod tests {
         let rm_addr = env.register_contract(None, ReserveManager);
         let rm = ReserveManagerClient::new(&env, &rm_addr);
         rm.initialize(&gov, &factory);
-        assert!(rm.try_initialize(&gov, &factory).is_err());
+        assert_eq!(
+            rm.try_initialize(&gov, &factory),
+            Err(Ok(ReserveManagerError::AlreadyInitialized))
+        );
     }
 
     #[test]
@@ -485,11 +524,33 @@ mod tests {
     }
 
     #[test]
+    fn test_set_min_reserve_to_zero_deletes_persistent_entry() {
+        let s = setup();
+        let rm = ReserveManagerClient::new(&s.env, &s.rm_addr);
+
+        rm.set_min_reserve(&s.ta, &s.tb, &2_000_000_i128, &2_000_000_i128);
+        let (ta, tb) = ReserveManager::normalize(s.ta.clone(), s.tb.clone());
+        let key = DataKey::MinReserve(ta, tb);
+
+        // The entry exists while a non-zero requirement is set.
+        assert!(s
+            .env
+            .as_contract(&s.rm_addr, || s.env.storage().persistent().has(&key)));
+
+        // Setting both minimums to zero must delete the key, not store (0, 0).
+        rm.set_min_reserve(&s.ta, &s.tb, &0_i128, &0_i128);
+        assert!(!s
+            .env
+            .as_contract(&s.rm_addr, || s.env.storage().persistent().has(&key)));
+    }
+
+    #[test]
     fn test_negative_min_reserve_panics() {
         let s = setup();
         let rm = ReserveManagerClient::new(&s.env, &s.rm_addr);
-        assert!(rm
-            .try_set_min_reserve(&s.ta, &s.tb, &-1_i128, &0_i128)
-            .is_err());
+        assert_eq!(
+            rm.try_set_min_reserve(&s.ta, &s.tb, &-1_i128, &0_i128),
+            Err(Ok(ReserveManagerError::NegativeReserveAmount))
+        );
     }
 }

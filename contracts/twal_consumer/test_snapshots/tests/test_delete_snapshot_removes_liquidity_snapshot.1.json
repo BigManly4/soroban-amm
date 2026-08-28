@@ -1274,6 +1274,51 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "SnapshotTimestamps"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "SnapshotTimestamps"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "vec": []
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          120960
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
                   "symbol": "TrackedPoolsPersistent"
                 }
               ]
@@ -1299,7 +1344,28 @@
                 "val": {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "address"
+                          },
+                          "val": {
+                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "pool_type"
+                          },
+                          "val": {
+                            "vec": [
+                              {
+                                "symbol": "Amm"
+                              }
+                            ]
+                          }
+                        }
+                      ]
                     }
                   ]
                 }
@@ -3264,7 +3330,7 @@
             ],
             "data": {
               "error": {
-                "contract": 5
+                "contract": 4
               }
             }
           }
@@ -3285,7 +3351,7 @@
               },
               {
                 "error": {
-                  "contract": 5
+                  "contract": 4
                 }
               }
             ],
@@ -3310,7 +3376,7 @@
               },
               {
                 "error": {
-                  "contract": 5
+                  "contract": 4
                 }
               }
             ],
